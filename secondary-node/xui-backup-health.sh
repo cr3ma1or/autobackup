@@ -57,11 +57,29 @@ sidecar="${latest}.sha256"
 # ------------------------------------------------------------------------------
 # Age & SLA Verification
 # ------------------------------------------------------------------------------
- now=$(date -u +%s)
+now=$(date -u +%s)
 archive_base="$(basename -- "$latest")"
 
 if [[ "$archive_base" =~ xui-backup-([0-9]{8})T([0-9]{6})Z- ]]; then
-  backup_epoch="$(date -u -d "${BASH_REMATCH[1]}T${BASH_REMATCH[2]}Z" +%s)" ||
+  raw_date="${BASH_REMATCH[1]}"   # 20260902
+  raw_time="${BASH_REMATCH[2]}"   # 032358
+  iso_date="${raw_date:0:4}-${raw_date:4:2}-${raw_date:6:2}"
+  iso_time="${raw_time:0:2}:${raw_time:2:2}:${raw_time:4:2}"
+  backup_epoch="$(date -u -d "${iso_date}T${iso_time}Z" +%s)" ||
+    critical "archive=$archive_base reason=unparseable_timestamp"
+else
+  critical "archive=$archive_base reason=unparseable_timestamp"
+fi
+
+now=$(date -u +%s)
+archive_base="$(basename -- "$latest")"
+
+if [[ "$archive_base" =~ xui-backup-([0-9]{8})T([0-9]{6})Z- ]]; then
+  raw_date="${BASH_REMATCH[1]}"   # 20260902
+  raw_time="${BASH_REMATCH[2]}"   # 032358
+  iso_date="${raw_date:0:4}-${raw_date:4:2}-${raw_date:6:2}"
+  iso_time="${raw_time:0:2}:${raw_time:2:2}:${raw_time:4:2}"
+  backup_epoch="$(date -u -d "${iso_date}T${iso_time}Z" +%s)" ||
     critical "archive=$archive_base reason=unparseable_timestamp"
 else
   critical "archive=$archive_base reason=unparseable_timestamp"
