@@ -36,7 +36,7 @@ readonly LOG_FILE="${BASE_DIR}/receiver.log"
 readonly MAX_BYTES=$((2 * 1024 * 1024 * 1024)) # 2 GiB limit
 readonly MAX_QUARANTINE_FILES=14
 readonly EXPECTED_USER="xbackup"
-readonly LOCK_FILE="${INCOMING_DIR}/.receiver.lock"
+readonly LOCK_FILE="${BASE_DIR}/.store.lock"
 readonly SCRIPT_NAME="${0##*/}"
 
 # ------------------------------------------------------------------------------

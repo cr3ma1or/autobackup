@@ -5,7 +5,8 @@
 #                 Rotates validated encrypted incoming archives and purges
 #                 expired quarantined/invalid items.
 #
-# Dependencies:   bash (>= 4.4), coreutils (sha256sum, date, sort, rm), findutils
+# Dependencies:   bash (>= 4.4), coreutils (sha256sum, date, sort, rm),
+#                 findutils, util-linux (flock)
 # Requirements:   Must not run as root; the service user needs write access
 #                 to INCOMING_DIR, INVALID_DIR and LOG_FILE.
 #
@@ -18,6 +19,11 @@
 set -Eeuo pipefail
 umask 077
 
+command -v flock >/dev/null 2>&1 || {
+  printf '%s\n' 'flock is required but was not found' >&2
+  exit 1
+}
+
 # ------------------------------------------------------------------------------
 # Configuration
 # ------------------------------------------------------------------------------
@@ -26,7 +32,8 @@ readonly SCRIPT_VERSION="1.3"
 readonly INCOMING_DIR="/opt/xui-backups/incoming"
 readonly INVALID_DIR="/opt/xui-backups/invalid"
 readonly LOG_FILE="/opt/xui-backups/receiver.log"
-
+readonly LOCK_FILE="/opt/xui-backups/.store.lock"
+readonly LOCK_WAIT_SECONDS=7200
 # Retention constraints
 readonly KEEP_MIN_ARCHIVES=3
 readonly KEEP_VALID_DAYS=21
@@ -60,6 +67,15 @@ fail() {
 [[ -d "$INCOMING_DIR" ]] || fail 'incoming_directory_missing'
 [[ -d "$INVALID_DIR" ]] || fail 'invalid_directory_missing'
 [[ -f "$LOG_FILE" && -w "$LOG_FILE" ]] || fail 'receiver_log_missing_or_not_writable'
+[[ -e "$LOCK_FILE" && ! -L "$LOCK_FILE" ]] || fail 'store_lock_missing_or_symlink'
+
+if ! exec 9>"$LOCK_FILE"; then
+  fail "store_lock_open_failed lock_file=$LOCK_FILE"
+fi
+
+if ! flock -w "$LOCK_WAIT_SECONDS" 9; then
+  fail "store_lock_timeout lock_file=$LOCK_FILE wait_seconds=$LOCK_WAIT_SECONDS"
+fi
 
 # ------------------------------------------------------------------------------
 # Stage 1: Sanitization & Rotation (Two-Pass Policy)
