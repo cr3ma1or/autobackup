@@ -35,6 +35,21 @@ critical() {
   exit 2
 }
 
+parse_backup_timestamp() {
+  local archive_base="$1"
+  local raw_date raw_time iso_date iso_time
+
+  if [[ "$archive_base" =~ xui-backup-([0-9]{8})T([0-9]{6})Z- ]]; then
+    raw_date="${BASH_REMATCH[1]}"
+    raw_time="${BASH_REMATCH[2]}"
+    iso_date="${raw_date:0:4}-${raw_date:4:2}-${raw_date:6:2}"
+    iso_time="${raw_time:0:2}:${raw_time:2:2}:${raw_time:4:2}"
+    date -u -d "${iso_date}T${iso_time}Z" +%s
+  else
+    return 1
+  fi
+}
+
 # ------------------------------------------------------------------------------
 # Pre-flight Checks
 # ------------------------------------------------------------------------------
@@ -60,30 +75,8 @@ sidecar="${latest}.sha256"
 now=$(date -u +%s)
 archive_base="$(basename -- "$latest")"
 
-if [[ "$archive_base" =~ xui-backup-([0-9]{8})T([0-9]{6})Z- ]]; then
-  raw_date="${BASH_REMATCH[1]}"   # 20260902
-  raw_time="${BASH_REMATCH[2]}"   # 032358
-  iso_date="${raw_date:0:4}-${raw_date:4:2}-${raw_date:6:2}"
-  iso_time="${raw_time:0:2}:${raw_time:2:2}:${raw_time:4:2}"
-  backup_epoch="$(date -u -d "${iso_date}T${iso_time}Z" +%s)" ||
-    critical "archive=$archive_base reason=unparseable_timestamp"
-else
+backup_epoch="$(parse_backup_timestamp "$archive_base")" ||
   critical "archive=$archive_base reason=unparseable_timestamp"
-fi
-
-now=$(date -u +%s)
-archive_base="$(basename -- "$latest")"
-
-if [[ "$archive_base" =~ xui-backup-([0-9]{8})T([0-9]{6})Z- ]]; then
-  raw_date="${BASH_REMATCH[1]}"   # 20260902
-  raw_time="${BASH_REMATCH[2]}"   # 032358
-  iso_date="${raw_date:0:4}-${raw_date:4:2}-${raw_date:6:2}"
-  iso_time="${raw_time:0:2}:${raw_time:2:2}:${raw_time:4:2}"
-  backup_epoch="$(date -u -d "${iso_date}T${iso_time}Z" +%s)" ||
-    critical "archive=$archive_base reason=unparseable_timestamp"
-else
-  critical "archive=$archive_base reason=unparseable_timestamp"
-fi
 
 age_seconds=$(( now - backup_epoch ))
  
