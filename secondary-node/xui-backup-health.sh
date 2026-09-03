@@ -2,10 +2,11 @@
 # ==============================================================================
 # Script:        xui-backup-health-v1.4.sh
 # Description:   Read-only health & SLA verification for X-UI backup archives.
-# Dependencies:  bash (>= 4.4), coreutils (find, sort, date, stat, sha256sum, grep, tail)
+# Dependencies:  bash (>= 4.4), coreutils (find, sort, date, stat, sha256sum, grep, tail, basename)
 # Inputs:        None (operates on configured filesystem paths)
 # Outputs:       Single/multi-line key-value status strings to stdout
 # Exit Codes:    0 = OK (SLA & integrity verified)
+#                1 = Usage error (invalid arguments)
 #                2 = CRITICAL (missing files, stale backup, checksum mismatch, etc.)
 # ==============================================================================
 
@@ -22,39 +23,111 @@ readonly MAX_BACKUP_AGE_HOURS=26
 # ------------------------------------------------------------------------------
 # Error Handling
 # ------------------------------------------------------------------------------
+
+get_last_receiver_log() {
+  if [[ -r "$LOG_FILE" ]]; then
+    local line
+    line=$(grep -E 'delivery_verified_ok|idempotent_delivery_skipped|orphan_archive_sidecar_repaired' "$LOG_FILE" 2>/dev/null | tail -n 1 || true)
+    printf '%s' "${line:-NONE}"
+  else
+    printf 'NONE'
+  fi
+}
+
 critical() {
   local last_log="NONE"
 
-  if [[ -r "$LOG_FILE" ]]; then
-    last_log=$(grep -E 'delivery_verified_ok|idempotent_delivery_skipped|orphan_archive_sidecar_repaired' "$LOG_FILE" 2>/dev/null | tail -n 1 || true)
-    [[ -n "$last_log" ]] || last_log="NONE"
-  fi
+  last_log="$(get_last_receiver_log)"
 
   printf 'STATUS=CRITICAL version=%s %s\n' "$SCRIPT_VERSION" "$1"
   printf 'LAST_RECEIVER_LOG=%s\n' "$last_log"
   exit 2
 }
 
+on_error() {
+  local exit_code=$? line="$1" cmd="$2"
+  trap - ERR   # предотвращаем рекурсивное срабатывание внутри самого обработчика
+  local last_log
+  last_log="$(get_last_receiver_log 2>/dev/null || printf 'NONE')"
+  printf 'STATUS=CRITICAL version=%s reason=unexpected_error line=%s cmd="%s" exit_code=%s\n' \
+    "$SCRIPT_VERSION" "$line" "$cmd" "$exit_code"
+  printf 'LAST_RECEIVER_LOG=%s\n' "$last_log"
+  exit 2
+}
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+
+
 parse_backup_timestamp() {
   local archive_base="$1"
   local raw_date raw_time iso_date iso_time
 
-  if [[ "$archive_base" =~ xui-backup-([0-9]{8})T([0-9]{6})Z- ]]; then
+  if [[ "$archive_base" =~ ^xui-backup-([0-9]{8})T([0-9]{6})Z- ]]; then
     raw_date="${BASH_REMATCH[1]}"
     raw_time="${BASH_REMATCH[2]}"
     iso_date="${raw_date:0:4}-${raw_date:4:2}-${raw_date:6:2}"
     iso_time="${raw_time:0:2}:${raw_time:2:2}:${raw_time:4:2}"
-    date -u -d "${iso_date}T${iso_time}Z" +%s
+    date -u -d "${iso_date}T${iso_time}Z" +%s 2>/dev/null
   else
     return 1
   fi
 }
 
+usage() {
+  cat <<EOF
+Usage: ${0##*/} [--help|--version]
+
+Read-only health & SLA verification for X-UI backup archives.
+
+Options:
+  -h, --help     Show this help message and exit
+  -v, --version  Show script version and exit
+EOF
+  exit 0
+}
+
+version() {
+  printf '%s version %s\n' "${0##*/}" "$SCRIPT_VERSION"
+  exit 0
+}
+
+check_dependencies() {
+  local cmd
+  for cmd in find sort date stat sha256sum grep tail basename; do
+    command -v -- "$cmd" >/dev/null 2>&1 || critical "reason=missing_dependency cmd=$cmd"
+  done
+}
+
+check_bash_version() {
+  if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    critical "reason=bash_too_old current=$BASH_VERSION required=4.4+"
+  fi
+}
+
 # ------------------------------------------------------------------------------
+# Main Entry Point
+# ------------------------------------------------------------------------------
+main() {
+  local latest sidecar now archive_base backup_epoch age_seconds age_hours archive_bytes last_log
+  local -a archives=()
+  if (( $# == 0 )); then
+    : # Штатный запуск без аргументов
+  elif [[ "$1" == "-h" || "$1" == "--help" ]] && (( $# == 1 )); then
+    usage
+  elif [[ "$1" == "-v" || "$1" == "--version" ]] && (( $# == 1 )); then
+    version
+  else
+    printf 'Invalid argument(s): %s\nRun "%s --help" for details.\n' "$*" "${0##*/}" >&2
+    exit 1
+  fi
+
+  check_dependencies
+  check_bash_version
+
+# --------------------------------------------------------------------------
 # Pre-flight Checks
-# ------------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Read-only; may run as xbackup or root, provided INCOMING_DIR/LOG_FILE are readable.
-[[ -d "$INCOMING_DIR" && -r "$INCOMING_DIR" ]] || critical 'reason=incoming_directory_missing_or_unreadable'
+[[ -d "$INCOMING_DIR" && -r "$INCOMING_DIR" && -x "$INCOMING_DIR" ]] || critical 'reason=incoming_directory_missing_or_unreadable'
 
 # ------------------------------------------------------------------------------
 # Archive Discovery & Selection
@@ -97,32 +170,32 @@ age_seconds=$(( now - backup_epoch ))
   critical "archive=$archive_base reason=archive_or_sidecar_missing_or_empty"
 
 # Subshell ensures working directory remains unchanged in the main execution context
-(cd "$INCOMING_DIR" && sha256sum -c --status -- "$(basename -- "$sidecar")") || \
+(cd -- "$INCOMING_DIR" && sha256sum -c --status -- "${sidecar##*/}") || \
   critical "archive=$archive_base reason=\"CHECKSUM_FAIL\""
 
+local archive_bytes
 archive_bytes="$(stat -c %s -- "$latest")" || \
   critical "archive=$archive_base reason=archive_vanished_during_check"
+
+[[ "$archive_bytes" =~ ^[0-9]+$ ]] || \
+  critical "archive=$archive_base reason=invalid_archive_size"
 
 # ------------------------------------------------------------------------------
 # Receiver Log Audit
 # ------------------------------------------------------------------------------
-last_log="NONE"
-if [[ -r "$LOG_FILE" ]]; then
-  last_log=$(grep -E 'delivery_verified_ok|idempotent_delivery_skipped|orphan_archive_sidecar_repaired' \
-    "$LOG_FILE" 2>/dev/null | tail -n 1 || true)
+last_log="$(get_last_receiver_log)"
 
-  if [[ -z "$last_log" ]]; then
-    last_log="NONE"
-  fi
-fi
+# --------------------------------------------------------------------------
+  # Report / Output
+  # --------------------------------------------------------------------------
+  printf 'STATUS=OK version=%s archive=%s bytes=%s age_hours=%s checksum=OK\n' \
+    "$SCRIPT_VERSION" \
+    "$archive_base" \
+    "$archive_bytes" \
+    "$age_hours"
 
-# ------------------------------------------------------------------------------
-# Report / Output
-# ------------------------------------------------------------------------------
-printf 'STATUS=OK version=%s archive=%s bytes=%s age_hours=%s checksum=OK\n' \
-  "$SCRIPT_VERSION" \
-  "$archive_base" \
-  "$archive_bytes" \
-  "$age_hours"
+  printf 'LAST_RECEIVER_LOG=%s\n' "$last_log"
+  exit 0
+}
 
-printf 'LAST_RECEIVER_LOG=%s\n' "$last_log"
+main "$@"
