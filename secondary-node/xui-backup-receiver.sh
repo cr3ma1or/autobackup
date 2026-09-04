@@ -48,6 +48,12 @@ readonly EXPECTED_USER="xbackup"
 readonly SCRIPT_NAME="${0##*/}"
 readonly MAX_BYTES=$((2 * 1024 * 1024 * 1024)) # 2 GiB upload threshold
 readonly MAX_QUARANTINE_FILES=14
+readonly MAX_DISK_USAGE_PCT=90
+readonly MIN_FREE_KB=512000            # 500 MiB floor
+readonly SAFETY_BUFFER_KB=102400       # 100 MiB per-upload buffer
+readonly MAX_UPLOADS_PER_24H=24
+readonly READ_TIMEOUT_SECONDS=300
+readonly LOG_FILE_WARN_BYTES=$((100 * 1024 * 1024)) # 100 MiB
 
 # ------------------------------------------------------------------------------
 # 2. Helper Functions & Error Handling
@@ -55,24 +61,25 @@ readonly MAX_QUARANTINE_FILES=14
 require_commands() {
   local command_name
 
-  for command_name in \
-    awk \
-    chmod \
-    cmp \
-    cut \
-    date \
-    df \
-    find \
-    flock \
-    head \
-    id \
-    mktemp \
-    mv \
-    rm \
-    sha256sum \
-    sort \
-    stat \
-    wc; do
+for command_name in \
+  awk \
+  chmod \
+  cmp \
+  cut \
+  date \
+  df \
+  find \
+  flock \
+  head \
+  id \
+  mktemp \
+  mv \
+  rm \
+  sha256sum \
+  sort \
+  stat \
+  timeout \
+  wc; do
     command -v "$command_name" >/dev/null 2>&1 ||
       fail "MISSING_DEPENDENCY" "command=$command_name"
   done
@@ -180,14 +187,17 @@ get_storage_metrics() {
     return 1
   fi
 
+  # Склеиваем перенесённые строки (длинное имя ФС), затем берём последнюю
+  # строку вывода -- это гарантированно строка данных, а не заголовок.
   awk '
-    NR == 2 {
-      gsub("%", "", $5)
-      print $5, $4
-      found = 1
-    }
+    NR > 1 { buf = (buf ? buf " " $0) : $0 }
     END {
-      exit(found ? 0 : 1)
+      n = split(buf, f, /[ \t]+/)
+      if (n < 5) { exit 1 }
+      pct = f[n-1]
+      avail = f[n-2]
+      gsub("%", "", pct)
+      print pct, avail
     }
   ' <<< "$df_output"
 }
@@ -210,9 +220,10 @@ check_storage_headroom() {
     fail "DISK_USAGE_INVALID" "usage_pct=$usage_pct avail_kb=$avail_kb"
   fi
 
-  if (( usage_pct >= 90 || avail_kb < 512000 )); then
+  if (( usage_pct >= MAX_DISK_USAGE_PCT || avail_kb < MIN_FREE_KB )); then
     fail "STORAGE_EXHAUSTED" "usage_pct=$usage_pct avail_kb=$avail_kb"
   fi
+
 }
 
 check_rate_limit() {
@@ -231,112 +242,121 @@ check_rate_limit() {
     fail "RATE_LIMIT_INVALID" "recent_count=$recent_count"
   fi
 
-  if (( recent_count >= 24 )); then
+  if (( recent_count >= MAX_UPLOADS_PER_24H )); then
     fail "RATE_LIMIT" "count_24h=$recent_count"
   fi
 }
 
 # ------------------------------------------------------------------------------
-# 3. Environment & Permission Checks
-# ------------------------------------------------------------------------------
-require_commands
-
-if [[ "$EUID" -eq 0 ]]; then
-  fail "REFUSING_ROOT_EXECUTION" "euid=$EUID"
-fi
-
-if [[ "$(id -un)" != "$EXPECTED_USER" ]]; then
-  fail "UNEXPECTED_EXECUTION_USER" \
-  "expected_user=$EXPECTED_USER actual_user=$(id -un)"
-fi
-
-if [[ ! -d "$BASE_DIR" || ! -d "$INCOMING_DIR" || ! -d "$INVALID_DIR" ]]; then
-  fail "STORAGE_DIRECTORY_MISSING" \
-    "base_dir=$BASE_DIR incoming_dir=$INCOMING_DIR invalid_dir=$INVALID_DIR"
-fi
-
-if [[ ! -w "$INCOMING_DIR" || ! -x "$INCOMING_DIR" ]]; then
-  fail "INCOMING_DIRECTORY_NOT_WRITABLE" "directory=$INCOMING_DIR"
-fi
-
-if [[ ! -w "$INVALID_DIR" || ! -x "$INVALID_DIR" ]]; then
-  fail "INVALID_DIRECTORY_NOT_WRITABLE" "directory=$INVALID_DIR"
-fi
-
-if [[ -L "$LOG_FILE" || ! -f "$LOG_FILE" || ! -w "$LOG_FILE" ]]; then
-  fail "LOG_FILE_UNAVAILABLE" "log_file=$LOG_FILE"
-fi
-
-check_storage_headroom
-
-# ------------------------------------------------------------------------------
-# 4. Command Parsing & Pre-flight Validation
-# ------------------------------------------------------------------------------
-original="${SSH_ORIGINAL_COMMAND:-}"
-command_regex='^receive[[:space:]]+(xui-backup-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.tar\.gz\.gpg)[[:space:]]+([a-f0-9]{64})[[:space:]]+([1-9][0-9]*)$'
-
-if [[ "$original" =~ $command_regex ]]; then
-  name="${BASH_REMATCH[1]}"
-  expected="${BASH_REMATCH[2]}"
-  declared_size="${BASH_REMATCH[3]}"
-else
-  fail "INVALID_COMMAND" "reason=invalid_requested_command"
-  fi
-
-if (( declared_size > MAX_BYTES )); then
-  fail "INVALID_SIZE" "archive=$name declared_size=$declared_size max_bytes=$MAX_BYTES"
-fi
-
-
-# Pre-check: declared payload plus 100 MiB safety buffer.
-if ! storage_metrics="$(get_storage_metrics)"; then
-  fail "DISK_SPACE_UNAVAILABLE" "base_dir=$BASE_DIR"
-fi
-
-if ! read -r _usage_pct avail_kb <<< "$storage_metrics"; then
-  fail "DISK_SPACE_INVALID" "metrics=$storage_metrics"
-fi
-
-if [[ ! "$avail_kb" =~ ^[0-9]+$ ]]; then
-  fail "DISK_SPACE_INVALID" "avail_kb=$avail_kb"
-fi
-
-needed_kb=$(((declared_size + 1023) / 1024 + 102400))
-
-# ------------------------------------------------------------------------------
 # Main Entry Point
 # ------------------------------------------------------------------------------
 main() {
-  local name declared_sha256 declared_size
+  local name expected declared_size
+  local original command_regex storage_metrics _usage_pct
   local -i needed_kb avail_kb
   local part="" part_hash="" final="" hash_file=""
+  local final_size actual_size actual expected_sidecar
 
   # ----------------------------------------------------------------------------
-  # Pre-flight Environment & Capacity Verification
+  # 3. Environment & Permission Checks
   # ----------------------------------------------------------------------------
+  require_commands
 
-if (( avail_kb < needed_kb )); then
-  fail "STORAGE_EXHAUSTED" "available_kb=$avail_kb needed_kb=$needed_kb"
-fi
+  if [[ "$EUID" -eq 0 ]]; then
+    fail "REFUSING_ROOT_EXECUTION" "euid=$EUID"
+  fi
 
-if ! exec 9>"$LOCK_FILE"; then
-  fail "RECEIVER_LOCK_OPEN_FAILED" "lock_file=$LOCK_FILE"
-fi
+  if [[ "$(id -un)" != "$EXPECTED_USER" ]]; then
+    fail "UNEXPECTED_EXECUTION_USER" \
+      "expected_user=$EXPECTED_USER actual_user=$(id -un)"
+  fi
 
-if ! flock -n 9; then
-  fail "RECEIVER_BUSY" "lock_file=$LOCK_FILE"
-fi
+  if [[ ! -d "$BASE_DIR" || ! -d "$INCOMING_DIR" || ! -d "$INVALID_DIR" ]]; then
+    fail "STORAGE_DIRECTORY_MISSING" \
+      "base_dir=$BASE_DIR incoming_dir=$INCOMING_DIR invalid_dir=$INVALID_DIR"
+  fi
 
-# ----------------------------------------------------------------------------
-# Target Paths & Temporary Allocation
-# ----------------------------------------------------------------------------
-if ! part="$(mktemp "${INCOMING_DIR}/.tmp_recv.XXXXXX")"; then
-  fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name"
-fi
+  if [[ ! -w "$INCOMING_DIR" || ! -x "$INCOMING_DIR" ]]; then
+    fail "INCOMING_DIRECTORY_NOT_WRITABLE" "directory=$INCOMING_DIR"
+  fi
 
-part_hash="${part}.sha256"
-final="${INCOMING_DIR}/${name}"
-hash_file="${final}.sha256"
+  if [[ ! -w "$INVALID_DIR" || ! -x "$INVALID_DIR" ]]; then
+    fail "INVALID_DIRECTORY_NOT_WRITABLE" "directory=$INVALID_DIR"
+  fi
+
+  if [[ -L "$LOG_FILE" || ! -f "$LOG_FILE" || ! -w "$LOG_FILE" ]]; then
+    fail "LOG_FILE_UNAVAILABLE" "log_file=$LOG_FILE"
+  fi
+
+  local log_size
+  if [[ -f "$LOG_FILE" ]]; then
+    log_size="$(stat -c '%s' -- "$LOG_FILE" 2>/dev/null || echo 0)"
+    if (( log_size > LOG_FILE_WARN_BYTES )); then
+      log WARN "log_file_large size_bytes=$log_size threshold_bytes=$LOG_FILE_WARN_BYTES"
+    fi
+  fi
+
+  check_storage_headroom
+
+  # ----------------------------------------------------------------------------
+  # 4. Command Parsing & Pre-flight Validation
+  # ----------------------------------------------------------------------------
+  original="${SSH_ORIGINAL_COMMAND:-}"
+  command_regex='^receive[[:space:]]+(xui-backup-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.tar\.gz\.gpg)[[:space:]]+([a-f0-9]{64})[[:space:]]+([1-9][0-9]*)$'
+
+  if [[ "$original" =~ $command_regex ]]; then
+    name="${BASH_REMATCH[1]}"
+    expected="${BASH_REMATCH[2]}"
+    declared_size="${BASH_REMATCH[3]}"
+  else
+    fail "INVALID_COMMAND" "reason=invalid_requested_command"
+  fi
+
+  if (( declared_size > MAX_BYTES )); then
+    fail "INVALID_SIZE" "archive=$name declared_size=$declared_size max_bytes=$MAX_BYTES"
+  fi
+
+  # Pre-check: declared payload plus 100 MiB safety buffer.
+  if ! storage_metrics="$(get_storage_metrics)"; then
+    fail "DISK_SPACE_UNAVAILABLE" "base_dir=$BASE_DIR"
+  fi
+
+  if ! read -r _usage_pct avail_kb <<< "$storage_metrics"; then
+    fail "DISK_SPACE_INVALID" "metrics=$storage_metrics"
+  fi
+
+  if [[ ! "$avail_kb" =~ ^[0-9]+$ ]]; then
+    fail "DISK_SPACE_INVALID" "avail_kb=$avail_kb"
+  fi
+
+  needed_kb=$(((declared_size + 1023) / 1024 + SAFETY_BUFFER_KB))
+
+  # ----------------------------------------------------------------------------
+  # Pre-flight Capacity Verification (теперь реально работает: avail_kb/needed_kb
+  # заполнены выше, в том же скоупе, без повторного local)
+  # ----------------------------------------------------------------------------
+  if (( avail_kb < needed_kb )); then
+    fail "STORAGE_EXHAUSTED" "available_kb=$avail_kb needed_kb=$needed_kb"
+  fi
+
+  if ! exec 9>"$LOCK_FILE"; then
+    fail "RECEIVER_LOCK_OPEN_FAILED" "lock_file=$LOCK_FILE"
+  fi
+
+  if ! flock -n 9; then
+    fail "RECEIVER_BUSY" "lock_file=$LOCK_FILE"
+  fi
+
+  # ----------------------------------------------------------------------------
+  # Target Paths & Temporary Allocation
+  # ----------------------------------------------------------------------------
+  if ! part="$(mktemp "${INCOMING_DIR}/.tmp_recv.XXXXXX")"; then
+    fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name"
+  fi
+
+  part_hash="${part}.sha256"
+  final="${INCOMING_DIR}/${name}"   # name теперь реально заполнено
+  hash_file="${final}.sha256"
 
 cleanup() {
   local -i exit_code=$?
@@ -351,9 +371,9 @@ cleanup() {
 on_error() {
   local -i exit_code=$1
   local -i line_no=$2
-  local command="$3"
+  local failed_cmd="$3"
   trap - ERR
-  fail "UNEXPECTED_RUNTIME_ERROR" "line=$line_no exit_code=$exit_code cmd=\"$command\""
+  fail "UNEXPECTED_RUNTIME_ERROR" "line=$line_no exit_code=$exit_code cmd=\"$failed_cmd\""
 }
 
 on_interrupt() {
@@ -363,15 +383,17 @@ on_interrupt() {
 }
 
 on_terminate() {
+  local signal_name="${1:-TERM}"
   trap - INT TERM ERR HUP
-  log WARN "interrupted reason=sigterm_received archive=${name:-unknown}" 2>/dev/null || true
+  log WARN "interrupted reason=sig${signal_name,,}_received archive=${name:-unknown}" 2>/dev/null || true
   exit 143
 }
 
 trap cleanup EXIT
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 trap on_interrupt INT
-trap on_terminate TERM HUP
+trap 'on_terminate TERM' TERM
+trap 'on_terminate HUP'  HUP
 
 # ----------------------------------------------------------------------------
 # Idempotent Delivery Check & Stream Drainage
@@ -460,10 +482,11 @@ check_rate_limit
 # ------------------------------------------------------------------------------
 # 7. Stream Ingestion & Verification
 # ------------------------------------------------------------------------------
-# Read payload from STDIN
-if ! head -c "$declared_size" > "$part"; then
+# Read payload from STDIN (с таймаутом на случай зависшего клиента,
+# который держит flock и слот rate-limit неопределённо долго)
+if ! timeout "${READ_TIMEOUT_SECONDS}" head -c "$declared_size" > "$part"; then
   quarantine_part 'partial'
-  fail "READ_FAILED" "archive=$name"
+  fail "READ_FAILED" "archive=$name reason=timeout_or_short_read"
 fi
 
 # Verify actual received byte count
