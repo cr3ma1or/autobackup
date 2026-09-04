@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # ==============================================================================
 # Script:         xui-backup-health.sh
 # Description:    Read-only health & SLA verification probe for 3x-ui / Xray backups.
