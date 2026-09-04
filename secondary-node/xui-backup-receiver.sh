@@ -1,43 +1,53 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Script: xui-backup-receiver.sh
-# Version: 1.4
-# Description: SSH forced-command receiver for automated, verified backup delivery.
-#
-# Context / Constraints:
-#   - Must be executed only by a dedicated non-root user (e.g., 'xbackup').
-#   - Configured via authorized_keys command="..." restriction.
-#   - Payload is streamed over STDIN.
-#
-# Inputs:
-#   - Environment: SSH_ORIGINAL_COMMAND ("receive <archive_name> <sha256> <size>")
-#   - STDIN: raw encrypted archive stream
-#
-# Outputs:
-#   - STDOUT: "OK <name> <sha256> <size>" on success, "ERROR <CODE>" on failure
-#   - Log: Appends structured events to /opt/xui-backups/receiver.log
-#
-# Dependencies:
-#   - bash (>= 4.0), GNU coreutils (head, stat, sha256sum, date, df, cut, sort)
-#   - GNU findutils (find with -printf), util-linux (flock)
-# ==============================================================================
+### ==============================================================================
+### Script:         xui-backup-receiver.sh
+### Description:    SSH forced-command receiver for automated, verified backup delivery.
+###                 Ingests payload stream over STDIN, validates SHA-256 integrity,
+###                 and atomically publishes archive and sidecar files.
+### Dependencies:   bash (>= 4.4), coreutils (cut, date, df, head, sha256sum, sort, stat),
+###                 findutils (find), util-linux (flock)
+### Requirements:   Must run under dedicated unprivileged user (xbackup, EUID != 0).
+###                 Executed strictly via authorized_keys command="..." restriction.
+###                 Requires read/write/exec (0700) on INCOMING_DIR and INVALID_DIR.
+###                 Requires read/write (0600) on LOG_FILE and pre-created LOCK_FILE.
+### Inputs:         - Environment: SSH_ORIGINAL_COMMAND ("receive <name> <sha256> <size>")
+###                 - STDIN: raw encrypted archive stream
+### Outputs:        - STDOUT: "OK <name> <sha256> <size>" on success, "ERROR <CODE>" on failure
+###                 - Appends structured audit logs to $LOG_FILE
+###                 - Standard error on runtime rejection
+### Infrastructure Paths:
+###   - Incoming store:   /opt/xui-backups/incoming       (0700 xbackup:xbackup)
+###   - Quarantine store: /opt/xui-backups/invalid        (0700 xbackup:xbackup)
+###   - Service log:      /opt/xui-backups/receiver.log   (0600 xbackup:xbackup)
+###   - Service lock:     /opt/xui-backups/.store.lock    (0600 xbackup:xbackup)
+### Exit Codes:
+###   0   - Success (delivery verified or idempotent delivery acknowledged)
+###   1   - Validation error, protocol failure, capacity exhaustion, or lock busy
+###   130 - Interrupted by SIGINT
+###   143 - Terminated by SIGTERM
+### ==============================================================================
 
 set -Eeuo pipefail
 umask 077
 
+command -v flock >/dev/null 2>&1 || {
+  printf '%s\n' 'flock is required but was not found' >&2
+  exit 1
+}
+
 # ------------------------------------------------------------------------------
-# 1. Configuration & Constants
+# Configuration & Constants
 # ------------------------------------------------------------------------------
 readonly SCRIPT_VERSION="1.4"
 readonly BASE_DIR="/opt/xui-backups"
 readonly INCOMING_DIR="${BASE_DIR}/incoming"
 readonly INVALID_DIR="${BASE_DIR}/invalid"
 readonly LOG_FILE="${BASE_DIR}/receiver.log"
-readonly MAX_BYTES=$((2 * 1024 * 1024 * 1024)) # 2 GiB limit
-readonly MAX_QUARANTINE_FILES=14
-readonly EXPECTED_USER="xbackup"
 readonly LOCK_FILE="${BASE_DIR}/.store.lock"
+readonly EXPECTED_USER="xbackup"
 readonly SCRIPT_NAME="${0##*/}"
+readonly MAX_BYTES=$((2 * 1024 * 1024 * 1024)) # 2 GiB upload threshold
+readonly MAX_QUARANTINE_FILES=14
 
 # ------------------------------------------------------------------------------
 # 2. Helper Functions & Error Handling
@@ -293,6 +303,18 @@ fi
 
 needed_kb=$(((declared_size + 1023) / 1024 + 102400))
 
+# ------------------------------------------------------------------------------
+# Main Entry Point
+# ------------------------------------------------------------------------------
+main() {
+  local name declared_sha256 declared_size
+  local -i needed_kb avail_kb
+  local part="" part_hash="" final="" hash_file=""
+
+  # ----------------------------------------------------------------------------
+  # Pre-flight Environment & Capacity Verification
+  # ----------------------------------------------------------------------------
+
 if (( avail_kb < needed_kb )); then
   fail "STORAGE_EXHAUSTED" "available_kb=$avail_kb needed_kb=$needed_kb"
 fi
@@ -305,9 +327,9 @@ if ! flock -n 9; then
   fail "RECEIVER_BUSY" "lock_file=$LOCK_FILE"
 fi
 
-# ------------------------------------------------------------------------------
-# 5. File Targets & Cleanup Trap
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Target Paths & Temporary Allocation
+# ----------------------------------------------------------------------------
 if ! part="$(mktemp "${INCOMING_DIR}/.tmp_recv.XXXXXX")"; then
   fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name"
 fi
@@ -316,26 +338,44 @@ part_hash="${part}.sha256"
 final="${INCOMING_DIR}/${name}"
 hash_file="${final}.sha256"
 
-on_signal() {
-  local sig="$1"
-  trap - HUP INT TERM
-  cleanup
-  log WARN "terminated_by_signal signal=$sig archive=$name"
-  kill -s "$sig" "$$"
+cleanup() {
+  local -i exit_code=$?
+  trap - EXIT ERR INT TERM HUP
+  flock -u 9 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
+  rm -f -- "${part:-}" "${part_hash:-}" 2>/dev/null || true
+  exit "$exit_code"
 }
 
-cleanup() {
-  rm -f -- "$part" "$part_hash"
+# shellcheck disable=SC2317,SC2329,SC2339 # Invoked indirectly via ERR trap
+on_error() {
+  local -i exit_code=$1
+  local -i line_no=$2
+  local command="$3"
+  trap - ERR
+  fail "UNEXPECTED_RUNTIME_ERROR" "line=$line_no exit_code=$exit_code cmd=\"$command\""
+}
+
+on_interrupt() {
+  trap - INT TERM ERR HUP
+  log WARN "interrupted reason=sigint_received archive=${name:-unknown}" 2>/dev/null || true
+  exit 130
+}
+
+on_terminate() {
+  trap - INT TERM ERR HUP
+  log WARN "interrupted reason=sigterm_received archive=${name:-unknown}" 2>/dev/null || true
+  exit 143
 }
 
 trap cleanup EXIT
-trap 'on_signal HUP'  HUP
-trap 'on_signal INT'  INT
-trap 'on_signal TERM' TERM
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+trap on_interrupt INT
+trap on_terminate TERM HUP
 
-# ------------------------------------------------------------------------------
-# 6. Idempotent Delivery Check, Collision Rejection & Rate Limit
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Idempotent Delivery Check & Stream Drainage
+# ----------------------------------------------------------------------------
 expected_sidecar="$(printf '%s  %s\n' "$expected" "$name")"
 
 if [[ -e "$final" || -e "$hash_file" ]]; then
@@ -477,3 +517,6 @@ trap - EXIT
 
 log INFO "delivery_verified_ok archive=$name bytes=$declared_size sha256=$expected"
 printf 'OK %s %s %s\n' "$name" "$expected" "$declared_size"
+}
+
+main "$@"
