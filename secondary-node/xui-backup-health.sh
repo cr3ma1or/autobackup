@@ -1,13 +1,28 @@
-#!/usr/bin/env bash
 # ==============================================================================
-# Script:        xui-backup-health-v1.4.sh
-# Description:   Read-only health & SLA verification for X-UI backup archives.
-# Dependencies:  bash (>= 4.4), coreutils (find, sort, date, stat, sha256sum, grep, tail)
-# Inputs:        None (operates on configured filesystem paths)
-# Outputs:       Single/multi-line key-value status strings to stdout
-# Exit Codes:    0 = OK (SLA & integrity verified)
-#                1 = Usage error (invalid arguments)
-#                2 = CRITICAL (missing files, stale backup, checksum mismatch, etc.)
+# Script:         xui-backup-health.sh
+# Description:    Read-only health & SLA verification probe for 3x-ui / Xray backups.
+#                 Audits the latest incoming archive, verifies SHA-256 integrity,
+#                 validates backup freshness against SLA (<= 26h), and inspects log.
+#
+# Dependencies:   bash (>= 4.4), coreutils (date, sha256sum, sort, stat, tail),
+#                 findutils (find), grep
+# Requirements:   Read-only probe; safe to run under dedicated user (xbackup) or root.
+#                 Requires read and execute (0500/0700) on INCOMING_DIR.
+#                 Requires read (0400/0600) on LOG_FILE (graceful fallback to NONE).
+#
+# Inputs:         None (optional CLI flags: -h/--help, -v/--version)
+# Outputs:        - Standard output: Key-Value status string (STATUS=OK|CRITICAL)
+#                 - Standard error on invalid CLI arguments
+#
+# Infrastructure Paths:
+#   - Incoming store:   /opt/xui-backups/incoming       (0700 xbackup:xbackup, read)
+#   - Service log:      /opt/xui-backups/receiver.log   (0600 xbackup:xbackup, read)
+#   - System symlink:   /usr/local/bin/xui-backup-health -> /opt/xui-backups/bin/xui-backup-health.sh
+#
+# Exit Codes:
+#   0   - OK (SLA threshold and SHA-256 integrity verified)
+#   1   - Usage error (invalid CLI arguments)
+#   2   - CRITICAL (missing archive, SLA exceeded, checksum failure, or interrupted)
 # ==============================================================================
 
 set -Eeuo pipefail
