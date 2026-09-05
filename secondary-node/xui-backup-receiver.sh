@@ -98,8 +98,8 @@ log() {
     return 0
   fi
 
-  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" ||
-  timestamp="1970-01-01T00:00:00Z"
+  printf -v timestamp '%(%Y-%m-%d %H:%M:%S)T' -1 2>/dev/null ||
+  timestamp="1970-01-01 00:00:00"
 
   line="$(printf '%s [%s] [%s v%s pid=%s] %s' \
   "$timestamp" "$level" "$SCRIPT_NAME" "$SCRIPT_VERSION" "$$" "$message")"
@@ -120,6 +120,9 @@ fail() {
 
   log ERROR "code=$code $message" || true
 
+  # Даём клиенту выгрузить остаток буфера сокета, предотвращая преждевременный SIGPIPE
+  timeout 0.5 cat > /dev/null 2>&1 || true
+
   printf 'ERROR %s\n' "$code"
   exit 1
 }
@@ -137,8 +140,8 @@ prune_quarantine() {
     fail "QUARANTINE_FAILED" "reason=manifest_creation_failed"
   fi
 
-  # pipefail честно перехватывает сбой любой команды в пайплайне:
-  if ! find "$INVALID_DIR" -maxdepth 1 -type f ! -name '.*' -printf '%T@\t%p\0' |
+  # Исключаем только сам служебный манифест ротации:
+  if ! find "$INVALID_DIR" -maxdepth 1 -type f ! -name '.prune_manifest.*' -printf '%T@\t%p\0' |
       sort -z -n |
       cut -z -f2- > "$manifest"; then
     rm -f -- "$manifest" || true
@@ -173,7 +176,7 @@ quarantine_part() {
     return 0
   fi
 
-  if ! target="$(mktemp "${INVALID_DIR}/.${name}.${suffix}.XXXXXX")"; then
+  if ! target="$(mktemp "${INVALID_DIR}/${name}.${suffix}.XXXXXX")"; then
     fail "QUARANTINE_TARGET_CREATE_FAILED" "archive=$name suffix=$suffix"
   fi
 
@@ -243,6 +246,8 @@ check_rate_limit() {
     fail "RATE_LIMIT_UNAVAILABLE" "directory=$INCOMING_DIR"
   fi
 
+  recent_count="${recent_count//[[:space:]]/}"
+
   if [[ ! "$recent_count" =~ ^[0-9]+$ ]]; then
     fail "RATE_LIMIT_INVALID" "recent_count=$recent_count"
   fi
@@ -253,13 +258,57 @@ check_rate_limit() {
 }
 
 # ------------------------------------------------------------------------------
+# Signal & Exit Handlers
+# ------------------------------------------------------------------------------
+part=""
+part_hash=""
+name=""
+
+cleanup() {
+  local -i exit_code=$?
+  trap - EXIT ERR INT TERM HUP
+  flock -u 9 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
+  rm -f -- "${part:-}" "${part_hash:-}" 2>/dev/null || true
+  exit "$exit_code"
+}
+
+# shellcheck disable=SC2317,SC2329,SC2339 # Invoked indirectly via ERR trap
+on_error() {
+  local -i exit_code=$1
+  local -i line_no=$2
+  local failed_cmd="$3"
+  trap - ERR
+  fail "UNEXPECTED_RUNTIME_ERROR" "line=$line_no exit_code=$exit_code cmd=\"$failed_cmd\""
+}
+
+on_interrupt() {
+  trap - INT TERM ERR HUP
+  log WARN "interrupted reason=sigint_received archive=${name:-unknown}" 2>/dev/null || true
+  exit 130
+}
+
+on_terminate() {
+  local signal_name="${1:-TERM}"
+  trap - INT TERM ERR HUP
+  log WARN "interrupted reason=sig${signal_name,,}_received archive=${name:-unknown}" 2>/dev/null || true
+  exit 143
+}
+
+# ------------------------------------------------------------------------------
 # Main Entry Point
 # ------------------------------------------------------------------------------
 main() {
-  local name expected declared_size
+  trap cleanup EXIT
+  trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
+  trap on_interrupt INT
+  trap 'on_terminate TERM' TERM
+  trap 'on_terminate HUP'  HUP
+
+  local expected declared_size
   local original command_regex storage_metrics _usage_pct
   local -i needed_kb avail_kb
-  local part="" part_hash="" final="" hash_file=""
+  local final="" hash_file=""
   local final_size actual_size actual expected_sidecar
 
   # ----------------------------------------------------------------------------
@@ -357,53 +406,8 @@ main() {
     fail "RECEIVER_BUSY" "lock_file=$LOCK_FILE"
   fi
 
-  # ----------------------------------------------------------------------------
-  # Target Paths & Temporary Allocation
-  # ----------------------------------------------------------------------------
-  if ! part="$(mktemp "${INCOMING_DIR}/.tmp_recv.XXXXXX")"; then
-    fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name"
-  fi
-
-  part_hash="${part}.sha256"
   final="${INCOMING_DIR}/${name}"   # name теперь реально заполнено
   hash_file="${final}.sha256"
-
-cleanup() {
-  local -i exit_code=$?
-  trap - EXIT ERR INT TERM HUP
-  flock -u 9 2>/dev/null || true
-  exec 9>&- 2>/dev/null || true
-  rm -f -- "${part:-}" "${part_hash:-}" 2>/dev/null || true
-  exit "$exit_code"
-}
-
-# shellcheck disable=SC2317,SC2329,SC2339 # Invoked indirectly via ERR trap
-on_error() {
-  local -i exit_code=$1
-  local -i line_no=$2
-  local failed_cmd="$3"
-  trap - ERR
-  fail "UNEXPECTED_RUNTIME_ERROR" "line=$line_no exit_code=$exit_code cmd=\"$failed_cmd\""
-}
-
-on_interrupt() {
-  trap - INT TERM ERR HUP
-  log WARN "interrupted reason=sigint_received archive=${name:-unknown}" 2>/dev/null || true
-  exit 130
-}
-
-on_terminate() {
-  local signal_name="${1:-TERM}"
-  trap - INT TERM ERR HUP
-  log WARN "interrupted reason=sig${signal_name,,}_received archive=${name:-unknown}" 2>/dev/null || true
-  exit 143
-}
-
-trap cleanup EXIT
-trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
-trap on_interrupt INT
-trap 'on_terminate TERM' TERM
-trap 'on_terminate HUP'  HUP
 
 # ----------------------------------------------------------------------------
 # Idempotent Delivery Check & Stream Drainage
@@ -450,6 +454,10 @@ if [[ -e "$final" || -e "$hash_file" ]]; then
         "archive=$name reason=orphan_archive_checksum_mismatch"
     fi
 
+    if ! part_hash="$(mktemp "${INCOMING_DIR}/.tmp_repair.XXXXXX")"; then
+      fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name reason=orphan_repair"
+    fi
+
     if ! printf '%s\n' "$expected_sidecar" > "$part_hash"; then
       fail "SIDECAR_WRITE_FAILED" \
         "archive=$name reason=orphan_archive_repair"
@@ -489,6 +497,11 @@ fi
 # Applies only to genuinely new archive publication.
 check_rate_limit
 
+if ! part="$(mktemp "${INCOMING_DIR}/.tmp_recv.XXXXXX")"; then
+  fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name"
+fi
+part_hash="${part}.sha256"
+
 # ------------------------------------------------------------------------------
 # 7. Stream Ingestion & Verification
 # ------------------------------------------------------------------------------
@@ -512,7 +525,7 @@ if [[ "$actual_size" != "$declared_size" ]]; then
 fi
 
 # Verify SHA256 checksum
-if ! actual="$(sha256sum -- "$part" | awk '{print $1}')"; then
+if ! actual="$(sha256sum -- "$part" | cut -d' ' -f1)"; then
   quarantine_part 'hash_failed'
   fail "CHECKSUM_CALCULATION_FAILED" "archive=$name"
 fi
@@ -538,15 +551,13 @@ if ! chmod 0600 "$part" "$part_hash"; then
   fail "ARCHIVE_PERMISSION_SET_FAILED" "archive=$name"
 fi
 
- if ! mv -f -- "$part" "$final"; then
-   fail "PUBLISH_FAILED" "artifact=archive archive=$name"
- fi
+if ! mv -f -- "$part" "$final"; then
+  fail "PUBLISH_FAILED" "artifact=archive archive=$name"
+fi
 
- if ! mv -f -- "$part_hash" "$hash_file"; then
-   fail "PUBLISH_FAILED" "artifact=sidecar archive=$name"
- fi
-
-trap - EXIT
+if ! mv -f -- "$part_hash" "$hash_file"; then
+  fail "PUBLISH_FAILED" "artifact=sidecar archive=$name"
+fi
 
 log INFO "delivery_verified_ok archive=$name bytes=$declared_size sha256=$expected"
 printf 'OK %s %s %s\n' "$name" "$expected" "$declared_size"
