@@ -53,12 +53,12 @@ readonly SCRIPT_NAME="${0##*/}"
 readonly MAX_BYTES=$((2 * 1024 * 1024 * 1024)) # 2 GiB upload threshold
 readonly MAX_QUARANTINE_FILES=14
 readonly MAX_DISK_USAGE_PCT=90
-readonly MIN_FREE_KB=512000            # 500 MiB floor
-readonly SAFETY_BUFFER_KB=102400       # 100 MiB per-upload buffer
+readonly MIN_FREE_KB=512000      # 500 MiB floor
+readonly SAFETY_BUFFER_KB=102400 # 100 MiB per-upload buffer
 readonly MAX_UPLOADS_PER_24H=24
 readonly READ_TIMEOUT_SECONDS=300
 readonly DRAIN_TIMEOUT_SECONDS=3
-readonly DRAIN_MAX_BYTES=16777216   # 16 MiB — with margin to cover TCP/SSH channel buffers
+readonly DRAIN_MAX_BYTES=16777216                   # 16 MiB — with margin to cover TCP/SSH channel buffers
 readonly LOG_FILE_WARN_BYTES=$((100 * 1024 * 1024)) # 100 MiB
 readonly -a REQUIRED_COMMANDS=(
   awk chmod cmp cut date df find flock head id
@@ -75,7 +75,7 @@ require_commands() {
     command -v "$command_name" >/dev/null 2>&1 ||
       fail "MISSING_DEPENDENCY" "command=$command_name"
   done
- }
+}
 
 log() {
   local level="$1"
@@ -88,12 +88,12 @@ log() {
   fi
 
   TZ=UTC printf -v timestamp '%(%Y-%m-%dT%H:%M:%SZ)T' -1 2>/dev/null ||
-  timestamp="1970-01-01T00:00:00Z"
+    timestamp="1970-01-01T00:00:00Z"
 
   line="$(printf '%s [%s] [%s v%s pid=%s] %s' \
-  "$timestamp" "$level" "$SCRIPT_NAME" "$SCRIPT_VERSION" "$$" "$message")"
+    "$timestamp" "$level" "$SCRIPT_NAME" "$SCRIPT_VERSION" "$$" "$message")"
 
-  if ! printf '%s\n' "$line" >> "$LOG_FILE"; then
+  if ! printf '%s\n' "$line" >>"$LOG_FILE"; then
     printf '%s\n' "$line" >&2
     return 1
   fi
@@ -114,7 +114,7 @@ fail() {
   # SSH/TCP window), with a dual cap on both time and volume -- does not
   # guarantee a full drain on early failure before payload transfer begins,
   # but covers the typical case.
-  timeout "${DRAIN_TIMEOUT_SECONDS}" head -c "${DRAIN_MAX_BYTES}" > /dev/null 2>&1 || true
+  timeout "${DRAIN_TIMEOUT_SECONDS}" head -c "${DRAIN_MAX_BYTES}" >/dev/null 2>&1 || true
 
   printf 'ERROR %s\n' "$code"
   exit 1
@@ -135,13 +135,13 @@ prune_quarantine() {
 
   # Exclude only the rotation's own service manifest:
   if ! find "$INVALID_DIR" -maxdepth 1 -type f ! -name '.prune_manifest.*' -printf '%T@\t%p\0' |
-      sort -z -n |
-      cut -z -f2- > "$manifest"; then
+    sort -z -n |
+    cut -z -f2- >"$manifest"; then
     rm -f -- "$manifest" || true
     fail "QUARANTINE_LISTING_FAILED" "directory=$INVALID_DIR"
   fi
 
-  if ! mapfile -d '' -t old_invalid < "$manifest"; then
+  if ! mapfile -d '' -t old_invalid <"$manifest"; then
     rm -f -- "$manifest" || true
     fail "QUARANTINE_MANIFEST_READ_FAILED" "manifest=$manifest"
   fi
@@ -150,7 +150,7 @@ prune_quarantine() {
     fail "QUARANTINE_MANIFEST_CLEANUP_FAILED" "manifest=$manifest"
 
   count=${#old_invalid[@]}
-  if (( count <= MAX_QUARANTINE_FILES )); then
+  if ((count <= MAX_QUARANTINE_FILES)); then
     return 0
   fi
 
@@ -201,9 +201,8 @@ get_storage_metrics() {
       gsub("%", "", pct)
       print pct, avail
     }
-  ' <<< "$df_output"
+  ' <<<"$df_output"
 }
-
 
 check_storage_headroom() {
   local metrics
@@ -214,7 +213,7 @@ check_storage_headroom() {
     fail "DISK_USAGE_UNAVAILABLE" "base_dir=$BASE_DIR"
   fi
 
-  if ! read -r usage_pct avail_kb <<< "$metrics"; then
+  if ! read -r usage_pct avail_kb <<<"$metrics"; then
     fail "DISK_USAGE_INVALID" "metrics=$metrics"
   fi
 
@@ -222,7 +221,7 @@ check_storage_headroom() {
     fail "DISK_USAGE_INVALID" "usage_pct=$usage_pct avail_kb=$avail_kb"
   fi
 
-  if (( usage_pct >= MAX_DISK_USAGE_PCT || avail_kb < MIN_FREE_KB )); then
+  if ((usage_pct >= MAX_DISK_USAGE_PCT || avail_kb < MIN_FREE_KB)); then
     fail "STORAGE_EXHAUSTED" "usage_pct=$usage_pct avail_kb=$avail_kb"
   fi
 
@@ -246,7 +245,7 @@ check_rate_limit() {
     fail "RATE_LIMIT_INVALID" "recent_count=$recent_count"
   fi
 
-  if (( recent_count >= MAX_UPLOADS_PER_24H )); then
+  if ((recent_count >= MAX_UPLOADS_PER_24H)); then
     fail "RATE_LIMIT" "count_24h=$recent_count"
   fi
 }
@@ -287,11 +286,11 @@ on_terminate() {
   trap - INT TERM ERR HUP
   log WARN "interrupted reason=sig${signal_name,,}_received archive=${name:-unknown}" 2>/dev/null || true
   case "$signal_name" in
-    HUP)  exit 129 ;;
+    HUP) exit 129 ;;
     TERM) exit 143 ;;
-    *)    exit 1 ;;
+    *) exit 1 ;;
   esac
- }
+}
 
 # ------------------------------------------------------------------------------
 # Main Entry Point
@@ -301,7 +300,7 @@ main() {
   trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
   trap on_interrupt INT
   trap 'on_terminate TERM' TERM
-  trap 'on_terminate HUP'  HUP
+  trap 'on_terminate HUP' HUP
 
   local expected declared_size
   local original command_regex storage_metrics _usage_pct
@@ -343,7 +342,7 @@ main() {
   local log_size
   if [[ -f "$LOG_FILE" ]]; then
     log_size="$(stat -c '%s' -- "$LOG_FILE" 2>/dev/null || echo 0)"
-    if (( log_size > LOG_FILE_WARN_BYTES )); then
+    if ((log_size > LOG_FILE_WARN_BYTES)); then
       log WARN "log_file_large size_bytes=$log_size threshold_bytes=$LOG_FILE_WARN_BYTES"
     fi
   fi
@@ -364,7 +363,7 @@ main() {
     fail "INVALID_COMMAND" "reason=invalid_requested_command"
   fi
 
-  if (( declared_size > MAX_BYTES )); then
+  if ((declared_size > MAX_BYTES)); then
     fail "INVALID_SIZE" "archive=$name declared_size=$declared_size max_bytes=$MAX_BYTES"
   fi
 
@@ -375,7 +374,7 @@ main() {
     fail "DISK_SPACE_UNAVAILABLE" "base_dir=$BASE_DIR"
   fi
 
-  if ! read -r _usage_pct avail_kb <<< "$storage_metrics"; then
+  if ! read -r _usage_pct avail_kb <<<"$storage_metrics"; then
     fail "DISK_SPACE_INVALID" "metrics=$storage_metrics"
   fi
 
@@ -389,7 +388,7 @@ main() {
   # Pre-flight Capacity Verification (now actually works: avail_kb/needed_kb
   # are populated above, in the same scope, without re-declaring local)
   # ----------------------------------------------------------------------------
-  if (( avail_kb < needed_kb )); then
+  if ((avail_kb < needed_kb)); then
     fail "STORAGE_EXHAUSTED" "available_kb=$avail_kb needed_kb=$needed_kb"
   fi
 
@@ -409,158 +408,158 @@ main() {
   final="${INCOMING_DIR}/${name}"
   hash_file="${final}.sha256"
 
-# ----------------------------------------------------------------------------
-# Idempotent Delivery Check & Stream Drainage
-# ----------------------------------------------------------------------------
-expected_sidecar="$(printf '%s  %s\n' "$expected" "$name")"
+  # ----------------------------------------------------------------------------
+  # Idempotent Delivery Check & Stream Drainage
+  # ----------------------------------------------------------------------------
+  expected_sidecar="$(printf '%s  %s\n' "$expected" "$name")"
 
-if [[ -e "$final" || -e "$hash_file" ]]; then
-  if [[ -f "$final" && -f "$hash_file" ]]; then
-    if ! final_size="$(stat -c '%s' -- "$final")"; then
-      fail "EXISTING_ARCHIVE_STAT_FAILED" "archive=$name"
+  if [[ -e "$final" || -e "$hash_file" ]]; then
+    if [[ -f "$final" && -f "$hash_file" ]]; then
+      if ! final_size="$(stat -c '%s' -- "$final")"; then
+        fail "EXISTING_ARCHIVE_STAT_FAILED" "archive=$name"
+      fi
+
+      if [[ "$final_size" == "$declared_size" ]] &&
+        printf '%s\n' "$expected_sidecar" | cmp -s - "$hash_file" &&
+        printf '%s\n' "$expected_sidecar" |
+        (cd "$INCOMING_DIR" && sha256sum -c --status -); then
+
+        # Drain the retransmitted payload before returning the idempotent result.
+        head -c "$declared_size" >/dev/null || true
+
+        log INFO \
+          "idempotent_delivery_skipped archive=$name bytes=$declared_size sha256=$expected"
+        printf 'OK %s %s %s\n' "$name" "$expected" "$declared_size"
+        exit 0
+      fi
+
+      fail "NAME_COLLISION" \
+        "archive=$name declared_sha256=$expected declared_size=$declared_size"
     fi
 
-    if [[ "$final_size" == "$declared_size" ]] &&
-       printf '%s\n' "$expected_sidecar" | cmp -s - "$hash_file" &&
-       printf '%s\n' "$expected_sidecar" |
-         (cd "$INCOMING_DIR" && sha256sum -c --status -); then
+    if [[ -f "$final" && ! -e "$hash_file" ]]; then
+      if ! final_size="$(stat -c '%s' -- "$final")"; then
+        fail "EXISTING_ARCHIVE_STAT_FAILED" "archive=$name"
+      fi
 
-      # Drain the retransmitted payload before returning the idempotent result.
-      head -c "$declared_size" > /dev/null || true
+      if [[ "$final_size" != "$declared_size" ]]; then
+        fail "NAME_COLLISION" \
+          "archive=$name reason=orphan_archive_size_mismatch existing_size=$final_size declared_size=$declared_size"
+      fi
 
-      log INFO \
-        "idempotent_delivery_skipped archive=$name bytes=$declared_size sha256=$expected"
+      if ! printf '%s\n' "$expected_sidecar" |
+        (cd "$INCOMING_DIR" && sha256sum -c --status -); then
+        fail "NAME_COLLISION" \
+          "archive=$name reason=orphan_archive_checksum_mismatch"
+      fi
+
+      if ! part_hash="$(mktemp "${INCOMING_DIR}/.tmp_repair.XXXXXX")"; then
+        fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name reason=orphan_repair"
+      fi
+
+      if ! printf '%s\n' "$expected_sidecar" >"$part_hash"; then
+        fail "SIDECAR_WRITE_FAILED" \
+          "archive=$name reason=orphan_archive_repair"
+      fi
+
+      if ! chmod 0600 "$part_hash"; then
+        fail "ARCHIVE_PERMISSION_SET_FAILED" \
+          "artifact=sidecar archive=$name reason=orphan_archive_repair"
+      fi
+
+      if ! mv -f -- "$part_hash" "$hash_file"; then
+        fail "PUBLISH_FAILED" \
+          "artifact=sidecar archive=$name reason=orphan_archive_repair"
+      fi
+
+      # Drain the retransmitted payload before returning the repaired result.
+      head -c "$declared_size" >/dev/null || true
+
+      log WARN \
+        "orphan_archive_sidecar_repaired archive=$name bytes=$declared_size sha256=$expected"
       printf 'OK %s %s %s\n' "$name" "$expected" "$declared_size"
       exit 0
     fi
 
-    fail "NAME_COLLISION" \
-      "archive=$name declared_sha256=$expected declared_size=$declared_size"
-  fi
+    if [[ ! -e "$final" && -f "$hash_file" ]]; then
+      if ! rm -f -- "$hash_file"; then
+        fail "ORPHAN_SIDECAR_CLEANUP_FAILED" "sidecar=$hash_file"
+      fi
 
-  if [[ -f "$final" && ! -e "$hash_file" ]]; then
-    if ! final_size="$(stat -c '%s' -- "$final")"; then
-      fail "EXISTING_ARCHIVE_STAT_FAILED" "archive=$name"
-    fi
-
-    if [[ "$final_size" != "$declared_size" ]]; then
+      log WARN "orphan_sidecar_removed sidecar=$hash_file"
+    else
       fail "NAME_COLLISION" \
-        "archive=$name reason=orphan_archive_size_mismatch existing_size=$final_size declared_size=$declared_size"
+        "archive=$name reason=unexpected_existing_file_type"
     fi
-
-    if ! printf '%s\n' "$expected_sidecar" |
-        (cd "$INCOMING_DIR" && sha256sum -c --status -); then
-      fail "NAME_COLLISION" \
-        "archive=$name reason=orphan_archive_checksum_mismatch"
-    fi
-
-    if ! part_hash="$(mktemp "${INCOMING_DIR}/.tmp_repair.XXXXXX")"; then
-      fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name reason=orphan_repair"
-    fi
-
-    if ! printf '%s\n' "$expected_sidecar" > "$part_hash"; then
-      fail "SIDECAR_WRITE_FAILED" \
-        "archive=$name reason=orphan_archive_repair"
-    fi
-
-    if ! chmod 0600 "$part_hash"; then
-      fail "ARCHIVE_PERMISSION_SET_FAILED" \
-        "artifact=sidecar archive=$name reason=orphan_archive_repair"
-    fi
-
-    if ! mv -f -- "$part_hash" "$hash_file"; then
-      fail "PUBLISH_FAILED" \
-        "artifact=sidecar archive=$name reason=orphan_archive_repair"
-    fi
-
-    # Drain the retransmitted payload before returning the repaired result.
-    head -c "$declared_size" > /dev/null || true
-
-    log WARN \
-      "orphan_archive_sidecar_repaired archive=$name bytes=$declared_size sha256=$expected"
-    printf 'OK %s %s %s\n' "$name" "$expected" "$declared_size"
-    exit 0
   fi
 
-  if [[ ! -e "$final" && -f "$hash_file" ]]; then
-    if ! rm -f -- "$hash_file"; then
-      fail "ORPHAN_SIDECAR_CLEANUP_FAILED" "sidecar=$hash_file"
-    fi
+  # Applies only to genuinely new archive publication.
+  check_rate_limit
 
-    log WARN "orphan_sidecar_removed sidecar=$hash_file"
-  else
-    fail "NAME_COLLISION" \
-      "archive=$name reason=unexpected_existing_file_type"
+  if ! part="$(mktemp "${INCOMING_DIR}/.tmp_recv.XXXXXX")"; then
+    fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name"
   fi
-fi
+  part_hash="${part}.sha256"
 
-# Applies only to genuinely new archive publication.
-check_rate_limit
+  # ------------------------------------------------------------------------------
+  # 7. Stream Ingestion & Verification
+  # ------------------------------------------------------------------------------
+  # Read payload from STDIN (with a timeout in case of a hung client
+  # holding the flock and rate-limit slot indefinitely)
+  if ! timeout "${READ_TIMEOUT_SECONDS}" head -c "$declared_size" >"$part"; then
+    quarantine_part 'partial'
+    fail "READ_FAILED" "archive=$name reason=timeout_or_short_read"
+  fi
 
-if ! part="$(mktemp "${INCOMING_DIR}/.tmp_recv.XXXXXX")"; then
-  fail "TEMPORARY_FILE_CREATION_FAILED" "archive=$name"
-fi
-part_hash="${part}.sha256"
+  # Verify actual received byte count
+  if ! actual_size="$(stat -c '%s' -- "$part")"; then
+    quarantine_part 'stat_failed'
+    fail "TEMPORARY_ARCHIVE_STAT_FAILED" "archive=$name"
+  fi
 
-# ------------------------------------------------------------------------------
-# 7. Stream Ingestion & Verification
-# ------------------------------------------------------------------------------
-# Read payload from STDIN (with a timeout in case of a hung client
-# holding the flock and rate-limit slot indefinitely)
-if ! timeout "${READ_TIMEOUT_SECONDS}" head -c "$declared_size" > "$part"; then
-  quarantine_part 'partial'
-  fail "READ_FAILED" "archive=$name reason=timeout_or_short_read"
-fi
+  if [[ "$actual_size" != "$declared_size" ]]; then
+    quarantine_part 'partial'
+    fail "SIZE_MISMATCH" \
+      "archive=$name expected_size=$declared_size actual_size=$actual_size"
+  fi
 
-# Verify actual received byte count
-if ! actual_size="$(stat -c '%s' -- "$part")"; then
-  quarantine_part 'stat_failed'
-  fail "TEMPORARY_ARCHIVE_STAT_FAILED" "archive=$name"
-fi
+  # Verify SHA256 checksum
+  if ! actual="$(sha256sum -- "$part" | cut -d' ' -f1)"; then
+    quarantine_part 'hash_failed'
+    fail "CHECKSUM_CALCULATION_FAILED" "archive=$name"
+  fi
 
-if [[ "$actual_size" != "$declared_size" ]]; then
-  quarantine_part 'partial'
-  fail "SIZE_MISMATCH" \
-  "archive=$name expected_size=$declared_size actual_size=$actual_size"
-fi
+  if [[ ! "$actual" =~ ^[a-f0-9]{64}$ ]]; then
+    quarantine_part 'hash_invalid'
+    fail "CHECKSUM_OUTPUT_INVALID" "archive=$name actual=$actual"
+  fi
 
-# Verify SHA256 checksum
-if ! actual="$(sha256sum -- "$part" | cut -d' ' -f1)"; then
-  quarantine_part 'hash_failed'
-  fail "CHECKSUM_CALCULATION_FAILED" "archive=$name"
-fi
+  if [[ "$actual" != "$expected" ]]; then
+    quarantine_part 'badsha256'
+    fail "CHECKSUM_MISMATCH" "archive=$name expected=$expected actual=$actual"
+  fi
 
-if [[ ! "$actual" =~ ^[a-f0-9]{64}$ ]]; then
-  quarantine_part 'hash_invalid'
-  fail "CHECKSUM_OUTPUT_INVALID" "archive=$name actual=$actual"
-fi
+  # ------------------------------------------------------------------------------
+  # 8. Finalization
+  # ------------------------------------------------------------------------------
+  if ! printf '%s  %s\n' "$expected" "$name" >"$part_hash"; then
+    fail "SIDECAR_WRITE_FAILED" "archive=$name"
+  fi
 
-if [[ "$actual" != "$expected" ]]; then
-  quarantine_part 'badsha256'
-  fail "CHECKSUM_MISMATCH" "archive=$name expected=$expected actual=$actual"
-fi
+  if ! chmod 0600 "$part" "$part_hash"; then
+    fail "ARCHIVE_PERMISSION_SET_FAILED" "archive=$name"
+  fi
 
-# ------------------------------------------------------------------------------
-# 8. Finalization
-# ------------------------------------------------------------------------------
-if ! printf '%s  %s\n' "$expected" "$name" > "$part_hash"; then
-  fail "SIDECAR_WRITE_FAILED" "archive=$name"
-fi
+  if ! mv -f -- "$part_hash" "$hash_file"; then
+    fail "PUBLISH_FAILED" "artifact=sidecar archive=$name"
+  fi
 
-if ! chmod 0600 "$part" "$part_hash"; then
-  fail "ARCHIVE_PERMISSION_SET_FAILED" "archive=$name"
-fi
+  if ! mv -f -- "$part" "$final"; then
+    fail "PUBLISH_FAILED" "artifact=archive archive=$name"
+  fi
 
-if ! mv -f -- "$part" "$final"; then
-  fail "PUBLISH_FAILED" "artifact=archive archive=$name"
-fi
-
-if ! mv -f -- "$part_hash" "$hash_file"; then
-  fail "PUBLISH_FAILED" "artifact=sidecar archive=$name"
-fi
-
-log INFO "delivery_verified_ok archive=$name bytes=$declared_size sha256=$expected"
-printf 'OK %s %s %s\n' "$name" "$expected" "$declared_size"
+  log INFO "delivery_verified_ok archive=$name bytes=$declared_size sha256=$expected"
+  printf 'OK %s %s %s\n' "$name" "$expected" "$declared_size"
 }
 
 main "$@"

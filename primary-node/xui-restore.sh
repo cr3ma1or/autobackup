@@ -48,7 +48,7 @@ load_env() {
   env_dump="$(mktemp "${BACKUP_DIR}/.restore_env.XXXXXX")"
   chmod 600 "$env_dump"
 
-  if ! python3 - "$ENV_FILE" > "$env_dump" <<'PY'
+  if ! python3 - "$ENV_FILE" >"$env_dump" <<'PY'
 import ast, re, sys
 allowed = {"BACKUP_PASSPHRASE"}
 line_re = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
@@ -83,20 +83,20 @@ PY
     key=${item%%=*}
     value=${item#*=}
     printf -v "$key" '%s' "$value"
-  done < "$env_dump"
+  done <"$env_dump"
 
   rm -f -- "$env_dump"
 }
 
 # Acquires an exclusive, non-blocking lock to prevent concurrent restores.
 acquire_lock() {
-install -d -m 0700 -o root -g root "$LOCK_DIR"
+  install -d -m 0700 -o root -g root "$LOCK_DIR"
 
-exec {LOCK_FD}>"$LOCK_FILE"
-flock -n "$LOCK_FD" || {
-echo 'Backup или восстановление x-ui уже выполняется; операция отменена.' >&2
-exit 1
-}
+  exec {LOCK_FD}>"$LOCK_FILE"
+  flock -n "$LOCK_FD" || {
+    echo 'Backup или восстановление x-ui уже выполняется; операция отменена.' >&2
+    exit 1
+  }
 }
 
 # Restores the previous database and restarts the service after abnormal exit.
@@ -104,31 +104,31 @@ cleanup() {
   local rc=$?
   trap - EXIT ERR INT TERM
 
-if [[ "$SERVICE_STOPPED" == 1 ]]; then
-  if [[ "$REPLACED_DB" == 1 && -n "$ROLLBACK_DB" && -f "$ROLLBACK_DB" ]]; then
-    if [[ "$(sqlite3 -readonly "$ROLLBACK_DB" 'PRAGMA integrity_check;' 2>/dev/null)" == ok ]]; then
-      echo 'Аварийный rollback исходной DB...'
+  if [[ "$SERVICE_STOPPED" == 1 ]]; then
+    if [[ "$REPLACED_DB" == 1 && -n "$ROLLBACK_DB" && -f "$ROLLBACK_DB" ]]; then
+      if [[ "$(sqlite3 -readonly "$ROLLBACK_DB" 'PRAGMA integrity_check;' 2>/dev/null)" == ok ]]; then
+        echo 'Аварийный rollback исходной DB...'
 
-      if mv -f -- "$ROLLBACK_DB" "$DB_PATH"; then
-        rm -f -- "${DB_PATH}-wal" "${DB_PATH}-shm" || true
+        if mv -f -- "$ROLLBACK_DB" "$DB_PATH"; then
+          rm -f -- "${DB_PATH}-wal" "${DB_PATH}-shm" || true
+        else
+          echo 'Не удалось атомарно опубликовать rollback DB; требуется ручное вмешательство.' >&2
+        fi
       else
-        echo 'Не удалось атомарно опубликовать rollback DB; требуется ручное вмешательство.' >&2
+        echo 'Rollback DB повреждена; автоматический откат пропущен. Требуется ручное вмешательство.' >&2
       fi
-    else
-      echo 'Rollback DB повреждена; автоматический откат пропущен. Требуется ручное вмешательство.' >&2
     fi
-  fi
 
-  echo "Запуск $XUI_SERVICE после аварийного завершения..."
-  systemctl start "$XUI_SERVICE" || true
-fi
+    echo "Запуск $XUI_SERVICE после аварийного завершения..."
+    systemctl start "$XUI_SERVICE" || true
+  fi
 
   if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
     rm -f -- "$TEMP_DIR/passphrase" || true
     rm -rf -- "$TEMP_DIR" || true
   fi
 
-  if (( LOCK_FD >= 0 )); then
+  if ((LOCK_FD >= 0)); then
     flock -u "$LOCK_FD" || true
     exec {LOCK_FD}>&- || true
     LOCK_FD=-1
@@ -140,13 +140,13 @@ fi
 
 # Removes leftover .restore_env.* dumps orphaned by an unclean prior exit.
 reap_stale_env_dumps() {
-  find "$BACKUP_DIR" -maxdepth 1 -type f -name '.restore_env.*' -mmin +60 -print0 2>/dev/null \
-    | while IFS= read -r -d '' f; do
-        [[ "$(stat -c '%U:%G' -- "$f")" == root:root ]] && {
-          shred -u -- "$f" 2>/dev/null || rm -f -- "$f"
-          echo "Reaped orphaned env dump: $(basename -- "$f")" >&2
-        }
-      done
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name '.restore_env.*' -mmin +60 -print0 2>/dev/null |
+    while IFS= read -r -d '' f; do
+      [[ "$(stat -c '%U:%G' -- "$f")" == root:root ]] && {
+        shred -u -- "$f" 2>/dev/null || rm -f -- "$f"
+        echo "Reaped orphaned env dump: $(basename -- "$f")" >&2
+      }
+    done
 }
 
 # Logs the failing command/line for post-mortem, then exits with its status
@@ -162,9 +162,9 @@ on_interrupt() {
   local sig="$1"
   echo 'Получен сигнал прерывания; выполняется корректное завершение...' >&2
   case "$sig" in
-    INT)  exit 130 ;;
+    INT) exit 130 ;;
     TERM) exit 143 ;;
-    *)    exit 130 ;;
+    *) exit 130 ;;
   esac
 }
 
@@ -176,33 +176,33 @@ validate() {
   }
 
   [[ -f "$ENV_FILE" ]] || {
-  echo 'Не найден файл .env.' >&2
-  exit 1
+    echo 'Не найден файл .env.' >&2
+    exit 1
   }
 
   [[ -f "$DB_PATH" ]] || {
-  echo 'Не найдена текущая DB x-ui.' >&2
-  exit 1
+    echo 'Не найдена текущая DB x-ui.' >&2
+    exit 1
   }
 
   [[ "$(stat -c '%U:%G:%a' "$DB_PATH")" == root:root:600 ]] || {
-  echo 'Небезопасные права текущей DB.' >&2
-  exit 1
+    echo 'Небезопасные права текущей DB.' >&2
+    exit 1
   }
 
   [[ "$(stat -c '%U:%G:%a' "$ENV_FILE")" == root:root:600 ]] || {
-  echo 'Небезопасные права .env.' >&2
-  exit 1
+    echo 'Небезопасные права .env.' >&2
+    exit 1
   }
 
   [[ "$(stat -c '%U:%G:%a' "$BACKUP_DIR")" == root:root:700 ]] || {
-  echo 'Небезопасные права backup-каталога.' >&2
-  exit 1
+    echo 'Небезопасные права backup-каталога.' >&2
+    exit 1
   }
 
   [[ "$(stat -c '%d' "$BACKUP_DIR")" == "$(stat -c '%d' "$DB_DIR")" ]] || {
-  echo 'Каталог backup и каталог DB находятся на разных файловых системах; атомарный restore невозможен.' >&2
-  exit 1
+    echo 'Каталог backup и каталог DB находятся на разных файловых системах; атомарный restore невозможен.' >&2
+    exit 1
   }
 
   command -v sqlite3 >/dev/null
@@ -239,12 +239,12 @@ select_archive() {
       find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.tar.gz.gpg' -print0 | sort -z
     )
 
-    (( ${#restore_archives[@]} > 0 )) || {
+    ((${#restore_archives[@]} > 0)) || {
       echo 'Бэкапы не найдены.'
       exit 1
     }
 
-    archive="${restore_archives[${#restore_archives[@]}-1]}"
+    archive="${restore_archives[${#restore_archives[@]} - 1]}"
   fi
 
   hash_file="${archive}.sha256"
@@ -265,22 +265,22 @@ verify_payload() {
   local members
 
   members="$(tar -tzf "$payload" | LC_ALL=C sort)" || {
-  echo 'Не удалось получить список файлов из расшифрованного payload.' >&2
-  return 1
+    echo 'Не удалось получить список файлов из расшифрованного payload.' >&2
+    return 1
   }
 
   case "$members" in
-  $'manifest.json\nx-ui.db'|$'3xui_export.json\nmanifest.json\nx-ui.db')
-  ;;
-  *)
-  echo 'Состав архива не соответствует допустимому формату backup.' >&2
-  return 1
-  ;;
+    $'manifest.json\nx-ui.db' | $'3xui_export.json\nmanifest.json\nx-ui.db')
+      ;;
+    *)
+      echo 'Состав архива не соответствует допустимому формату backup.' >&2
+      return 1
+      ;;
   esac
 
   tar -xzf "$payload" -C "$out" --no-same-owner --no-same-permissions || {
-  echo 'Не удалось распаковать расшифрованный payload.' >&2
-  return 1
+    echo 'Не удалось распаковать расшифрованный payload.' >&2
+    return 1
   }
 
   if ! python3 - "$out" <<'PY'
@@ -411,13 +411,13 @@ if restored_tables != sorted(tables):
     raise SystemExit("Manifest table list differs from DB")
 PY
   then
-  echo 'Manifest или содержимое расшифрованного payload не прошло проверку.' >&2
-  return 1
+    echo 'Manifest или содержимое расшифрованного payload не прошло проверку.' >&2
+    return 1
   fi
 
   if [[ "$(sqlite3 -readonly "$out/x-ui.db" 'PRAGMA integrity_check;')" != ok ]]; then
     echo 'SQLite integrity_check расшифрованной DB завершился ошибкой.' >&2
-  return 1
+    return 1
   fi
 
   return 0
@@ -425,10 +425,10 @@ PY
 
 # Prints verified backup metadata before any destructive restore action.
 print_restore_preflight() {
-local manifest_path=$1
-local archive_path=$2
+  local manifest_path=$1
+  local archive_path=$2
 
-python3 - "$manifest_path" "$archive_path" <<'PY'
+  python3 - "$manifest_path" "$archive_path" <<'PY'
 import json
 import os
 import sys
@@ -484,10 +484,10 @@ PY
 # Returns 0 for full schema match, 10 for a detected mismatch, and another
 # non-zero code for a technical comparison failure.
 compare_schema() {
-local current_db=$1
-local backup_db=$2
+  local current_db=$1
+  local backup_db=$2
 
-python3 - "$current_db" "$backup_db" <<'PY'
+  python3 - "$current_db" "$backup_db" <<'PY'
 import sqlite3
 import sys
 from urllib.parse import quote
@@ -558,13 +558,13 @@ main() {
   trap on_error ERR
   trap 'on_interrupt INT' INT
   trap 'on_interrupt TERM' TERM
-  
+
   reap_stale_env_dumps
-  
+
   acquire_lock
 
   validate
-  
+
   select_archive "${1:-}"
 
   echo "Выбран архив: $ARCHIVE"
@@ -582,7 +582,7 @@ main() {
 
   TEMP_DIR="$(mktemp -d "${BACKUP_DIR}/.restore_work.XXXXXX")"
   chmod 700 "$TEMP_DIR"
-  printf %s "$BACKUP_PASSPHRASE" > "$TEMP_DIR/passphrase"
+  printf %s "$BACKUP_PASSPHRASE" >"$TEMP_DIR/passphrase"
   chmod 600 "$TEMP_DIR/passphrase"
   unset BACKUP_PASSPHRASE
 
@@ -616,29 +616,29 @@ main() {
   fi
 
   print_restore_preflight "$out/manifest.json" "$ARCHIVE" || {
-  echo 'Не удалось вывести проверенные metadata backup.' >&2
-  exit 1
+    echo 'Не удалось вывести проверенные metadata backup.' >&2
+    exit 1
   }
 
   schema_rc=0
   compare_schema "$DB_PATH" "$out/x-ui.db" || schema_rc=$?
 
-  if (( schema_rc == 10 )); then
+  if ((schema_rc == 10)); then
     echo
     echo 'ВНИМАНИЕ: схема backup отличается от текущей рабочей DB.'
     echo 'Продолжение может потребовать миграции 3x-ui после запуска сервиса.'
 
-  if ! read -r -p 'Для подтверждения восстановления при различии схемы введите строго YES: ' schema_answer; then
-    echo
-    echo 'Отменено: не получено подтверждение YES.'
-    exit 0
-  fi
+    if ! read -r -p 'Для подтверждения восстановления при различии схемы введите строго YES: ' schema_answer; then
+      echo
+      echo 'Отменено: не получено подтверждение YES.'
+      exit 0
+    fi
 
-  if [[ "$schema_answer" != YES ]]; then
-    echo 'Отменено: подтверждение YES не получено.'
-    exit 0
-  fi
-  elif (( schema_rc != 0 )); then
+    if [[ "$schema_answer" != YES ]]; then
+      echo 'Отменено: подтверждение YES не получено.'
+      exit 0
+    fi
+  elif ((schema_rc != 0)); then
     echo 'Не удалось сравнить schema текущей и backup DB.' >&2
     exit "$schema_rc"
   fi
@@ -679,24 +679,24 @@ SQL
     exit 1
   }
 
-install -o "$owner" -g "$group" -m "$mode" "$out/x-ui.db" "$restore_new"
+  install -o "$owner" -g "$group" -m "$mode" "$out/x-ui.db" "$restore_new"
 
-if [[ "$(sqlite3 -readonly "$restore_new" 'PRAGMA integrity_check;')" != ok ]]; then
-echo 'Подготовленная DB для публикации не проходит integrity_check.' >&2
-exit 1
-fi
+  if [[ "$(sqlite3 -readonly "$restore_new" 'PRAGMA integrity_check;')" != ok ]]; then
+    echo 'Подготовленная DB для публикации не проходит integrity_check.' >&2
+    exit 1
+  fi
 
-mv -f -- "$restore_new" "$DB_PATH"
-REPLACED_DB=1
+  mv -f -- "$restore_new" "$DB_PATH"
+  REPLACED_DB=1
 
-rm -f -- "${DB_PATH}-wal" "${DB_PATH}-shm"
+  rm -f -- "${DB_PATH}-wal" "${DB_PATH}-shm"
 
   systemctl start "$XUI_SERVICE"
 
   local -i attempt=0
   until systemctl is-active --quiet "$XUI_SERVICE"; do
-    (( attempt++ ))
-    if (( attempt >= 15 )); then
+    ((attempt++))
+    if ((attempt >= 15)); then
       echo 'Сервис не запустился за отведённое время; выполнится rollback.' >&2
       exit 1
     fi

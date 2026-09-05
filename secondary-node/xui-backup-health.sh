@@ -74,7 +74,6 @@ on_error() {
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 trap 'critical "reason=interrupted"' INT TERM
 
-
 parse_backup_timestamp() {
   local archive_base="$1"
   local raw_date raw_time iso_date iso_time
@@ -116,7 +115,7 @@ check_dependencies() {
 }
 
 check_bash_version() {
-  if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
     critical "reason=bash_too_old current=$BASH_VERSION required=4.4+"
   fi
 }
@@ -127,11 +126,11 @@ check_bash_version() {
 main() {
   local latest sidecar now archive_base backup_epoch age_seconds age_hours archive_bytes last_log
   local -a archives=()
-  if (( $# == 0 )); then
+  if (($# == 0)); then
     : # Штатный запуск без аргументов
-  elif [[ "$1" == "-h" || "$1" == "--help" ]] && (( $# == 1 )); then
+  elif [[ "$1" == "-h" || "$1" == "--help" ]] && (($# == 1)); then
     usage
-  elif [[ "$1" == "-v" || "$1" == "--version" ]] && (( $# == 1 )); then
+  elif [[ "$1" == "-v" || "$1" == "--version" ]] && (($# == 1)); then
     version
   else
     printf 'Invalid argument(s): %s\nRun "%s --help" for details.\n' "$*" "${0##*/}" >&2
@@ -141,71 +140,71 @@ main() {
   check_dependencies
   check_bash_version
 
-# --------------------------------------------------------------------------
-# Pre-flight Checks
-# --------------------------------------------------------------------------
-# Read-only; may run as xbackup or root, provided INCOMING_DIR/LOG_FILE are readable.
+  # --------------------------------------------------------------------------
+  # Pre-flight Checks
+  # --------------------------------------------------------------------------
+  # Read-only; may run as xbackup or root, provided INCOMING_DIR/LOG_FILE are readable.
   [[ -d "$INCOMING_DIR" && -r "$INCOMING_DIR" && -x "$INCOMING_DIR" ]] || critical 'reason=incoming_directory_missing_or_unreadable'
 
-# ------------------------------------------------------------------------------
-# Archive Discovery & Selection
-# ------------------------------------------------------------------------------
-# Read null-delimited sorted list of matching archives into an indexed array
+  # ------------------------------------------------------------------------------
+  # Archive Discovery & Selection
+  # ------------------------------------------------------------------------------
+  # Read null-delimited sorted list of matching archives into an indexed array
   mapfile -d '' -t archives < <(
-  find "$INCOMING_DIR" -maxdepth 1 -type f -name 'xui-backup-*.tar.gz.gpg' -print0 | sort -z
+    find "$INCOMING_DIR" -maxdepth 1 -type f -name 'xui-backup-*.tar.gz.gpg' -print0 | sort -z
   )
 
-  (( ${#archives[@]} > 0 )) || critical 'reason=no_archives_found'
-# Pick the newest lexicographically sorted archive and its sidecar
-  latest="${archives[${#archives[@]}-1]}"
+  ((${#archives[@]} > 0)) || critical 'reason=no_archives_found'
+  # Pick the newest lexicographically sorted archive and its sidecar
+  latest="${archives[${#archives[@]} - 1]}"
   sidecar="${latest}.sha256"
 
-# ------------------------------------------------------------------------------
-# Age & SLA Verification
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
+  # Age & SLA Verification
+  # ------------------------------------------------------------------------------
   now=$(date -u +%s)
   archive_base="${latest##*/}"
 
-  backup_epoch="$(parse_backup_timestamp "$archive_base")" || \
+  backup_epoch="$(parse_backup_timestamp "$archive_base")" ||
     critical "archive=$archive_base reason=unparseable_timestamp"
 
-  [[ "$backup_epoch" =~ ^[0-9]+$ ]] || \
+  [[ "$backup_epoch" =~ ^[0-9]+$ ]] ||
     critical "archive=$archive_base reason=invalid_timestamp_epoch"
 
-  age_seconds=$(( now - backup_epoch ))
+  age_seconds=$((now - backup_epoch))
 
-  if (( age_seconds < 0 )); then
+  if ((age_seconds < 0)); then
     age_seconds=0
   fi
 
-  age_hours=$(( age_seconds / 3600 ))
+  age_hours=$((age_seconds / 3600))
 
-  if (( age_seconds > MAX_BACKUP_AGE_HOURS * 3600 )); then
+  if ((age_seconds > MAX_BACKUP_AGE_HOURS * 3600)); then
     critical "archive=$archive_base reason=age_exceeded age_hours=$age_hours age_seconds=$age_seconds max_age_hours=$MAX_BACKUP_AGE_HOURS"
   fi
 
-# ------------------------------------------------------------------------------
-# Integrity & Checksum Verification
-# ------------------------------------------------------------------------------
-  [[ -s "$latest" && -s "$sidecar" ]] || \
+  # ------------------------------------------------------------------------------
+  # Integrity & Checksum Verification
+  # ------------------------------------------------------------------------------
+  [[ -s "$latest" && -s "$sidecar" ]] ||
     critical "archive=$archive_base reason=archive_or_sidecar_missing_or_empty"
 
-# Subshell ensures working directory remains unchanged in the main execution context
-  (cd -- "$INCOMING_DIR" && sha256sum -c --status -- "${sidecar##*/}") || \
+  # Subshell ensures working directory remains unchanged in the main execution context
+  (cd -- "$INCOMING_DIR" && sha256sum -c --status -- "${sidecar##*/}") ||
     critical "archive=$archive_base reason=checksum_fail"
 
-  archive_bytes="$(stat -c %s -- "$latest")" || \
+  archive_bytes="$(stat -c %s -- "$latest")" ||
     critical "archive=$archive_base reason=archive_vanished_during_check"
 
-  [[ "$archive_bytes" =~ ^[0-9]+$ ]] || \
+  [[ "$archive_bytes" =~ ^[0-9]+$ ]] ||
     critical "archive=$archive_base reason=invalid_archive_size"
 
-# ------------------------------------------------------------------------------
-# Receiver Log Audit
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
+  # Receiver Log Audit
+  # ------------------------------------------------------------------------------
   last_log="$(get_last_receiver_log 2>/dev/null || printf 'NONE')"
 
-# --------------------------------------------------------------------------
+  # --------------------------------------------------------------------------
   # Report / Output
   # --------------------------------------------------------------------------
   printf 'STATUS=OK version=%s archive=%s bytes=%s age_hours=%s checksum=OK\n' \

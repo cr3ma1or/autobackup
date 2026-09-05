@@ -7,7 +7,7 @@
 # Description: 3x-ui encrypted SQLite backup + JSON payload export with
 #              manifest hashing, local retention rotation, weekly restore tests,
 #              Telegram notifications, and non-blocking verified off-site transfer.
-#              Temp files on physical disk; adaptive disk pre-flight; optional JSON export; 
+#              Temp files on physical disk; adaptive disk pre-flight; optional JSON export;
 #              non-blocking Telegram; min-archive-safe rotation.
 # Author:      cr3ma1or
 # Last Change: 2026-08-30
@@ -170,14 +170,14 @@ log() {
     "$timestamp" "$level" "$(basename -- "$0")" "$$" "$message")"
 
   if [[ -n "${LOG_FILE:-}" ]]; then
-    printf '%s\n' "$line" >> "$LOG_FILE"
+    printf '%s\n' "$line" >>"$LOG_FILE"
   fi
 
   case "$level" in
-    ERROR|WARN)
+    ERROR | WARN)
       printf '%s\n' "$line" >&2
       ;;
-    INFO|DEBUG)
+    INFO | DEBUG)
       printf '%s\n' "$line"
       ;;
     *)
@@ -218,7 +218,7 @@ wipe_file() {
 
 reap_stale_work_dirs() {
   local hours="${STALE_WORK_HOURS:-24}"
-  local stale_min=$(( hours * 60 ))
+  local stale_min=$((hours * 60))
   local stale
   local list_file
 
@@ -349,8 +349,8 @@ oldest_archive() {
 }
 
 archive_set_size_bytes() {
-  find "$BACKUP_DIR" -maxdepth 1 -type f \( -name '*.tar.gz.gpg' -o -name '*.tar.gz.gpg.sha256' \) -printf '%s\n' \
-    | awk '{sum+=$1} END {print sum+0}'
+  find "$BACKUP_DIR" -maxdepth 1 -type f \( -name '*.tar.gz.gpg' -o -name '*.tar.gz.gpg.sha256' \) -printf '%s\n' |
+    awk '{sum+=$1} END {print sum+0}'
 }
 
 oldest_archives_sorted() {
@@ -363,8 +363,11 @@ check_disk_space() {
   local avail_kb
 
   avail_kb="$(df -kP "$target_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
-  [[ "$avail_kb" =~ ^[0-9]+$ ]] || { log ERROR "Unable to determine disk space on $target_dir"; exit 1; }
-  if (( avail_kb < required_mb * 1024 )); then
+  [[ "$avail_kb" =~ ^[0-9]+$ ]] || {
+    log ERROR "Unable to determine disk space on $target_dir"
+    exit 1
+  }
+  if ((avail_kb < required_mb * 1024)); then
     log ERROR "Insufficient disk space on $target_dir: ${avail_kb}KB available, ${required_mb}MB required"
     exit 1
   fi
@@ -375,8 +378,8 @@ required_work_mb() {
   db_bytes="$(stat -c %s "$DB_PATH" 2>/dev/null || echo 0)"
   factor=4
   [[ "${EXPORT_JSON:-1}" == 1 ]] && factor=6
-  db_mb=$(( (db_bytes * factor) / 1024 / 1024 ))
-  (( db_mb < 100 )) && db_mb=100
+  db_mb=$(((db_bytes * factor) / 1024 / 1024))
+  ((db_mb < 100)) && db_mb=100
   printf '%s' "$db_mb"
 }
 
@@ -470,17 +473,17 @@ load_transfer_config() {
 
   [[ "$TRANSFER_ENABLED" == 1 ]] || return 0
 
-  if [[ ! "$TRANSFER_HOST" =~ ^[A-Za-z0-9.-]+$ || \
-        ! "$TRANSFER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ || \
-        ! "$TRANSFER_PORT" =~ ^[1-9][0-9]{0,4}$ || \
-        ! -f "$TRANSFER_KEY" || \
-        ! -f "$TRANSFER_KNOWN_HOSTS" ]]; then
+  if [[ ! "$TRANSFER_HOST" =~ ^[A-Za-z0-9.-]+$ ||
+    ! "$TRANSFER_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ||
+    ! "$TRANSFER_PORT" =~ ^[1-9][0-9]{0,4}$ ||
+    ! -f "$TRANSFER_KEY" ||
+    ! -f "$TRANSFER_KNOWN_HOSTS" ]]; then
     log ERROR 'Offsite delivery disabled: invalid transfer endpoint configuration'
     TRANSFER_ENABLED=0
     return 0
   fi
 
-  if (( 10#$TRANSFER_PORT < 1 || 10#$TRANSFER_PORT > 65535 )); then
+  if ((10#$TRANSFER_PORT < 1 || 10#$TRANSFER_PORT > 65535)); then
     log ERROR 'Offsite delivery disabled: TRANSFER_PORT out of range'
     TRANSFER_ENABLED=0
     return 0
@@ -537,9 +540,18 @@ prepare_backup_tree() {
 }
 
 validate() {
-  [[ $EUID -eq 0 ]] || { log ERROR 'Must run as root'; exit 1; }
-  [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] || { log ERROR 'Internal error: TEMP_DIR not ready'; exit 1; }
-  [[ -f "$ENV_FILE" && -f "$DB_PATH" ]] || { log ERROR 'Missing .env or database'; exit 1; }
+  [[ $EUID -eq 0 ]] || {
+    log ERROR 'Must run as root'
+    exit 1
+  }
+  [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] || {
+    log ERROR 'Internal error: TEMP_DIR not ready'
+    exit 1
+  }
+  [[ -f "$ENV_FILE" && -f "$DB_PATH" ]] || {
+    log ERROR 'Missing .env or database'
+    exit 1
+  }
   [[ "$(stat -c '%U:%G:%a' "$ENV_FILE")" == "root:root:600" ]] || {
     log ERROR "Unsafe .env owner/mode: $ENV_FILE"
     exit 1
@@ -560,7 +572,7 @@ validate() {
     exit 1
   fi
 
-  if (( ${#BACKUP_PASSPHRASE} < MIN_PASSPHRASE_CHARS )); then
+  if ((${#BACKUP_PASSPHRASE} < MIN_PASSPHRASE_CHARS)); then
     log ERROR "BACKUP_PASSPHRASE must be at least ${MIN_PASSPHRASE_CHARS} characters"
     exit 1
   fi
@@ -651,7 +663,7 @@ send_tg() {
   if [[ "$kind" != text ]]; then
     local file_bytes
     file_bytes="$(stat -c %s -- "$payload" 2>/dev/null || echo 0)"
-    if (( file_bytes > 49 * 1024 * 1024 )); then
+    if ((file_bytes > 49 * 1024 * 1024)); then
       log WARN "Archive size (${file_bytes} bytes) exceeds Telegram 50MB limit; sending text alert"
       send_tg text "⚠️ 3x-ui backup archive exceeds Telegram 50MB limit (${file_bytes} bytes). Document attachment skipped; local and offsite delivery proceed normally." || true
       return 0
@@ -689,7 +701,7 @@ send_tg() {
 
   wipe_file "$cfg"
 
-  if (( rc == 0 )); then
+  if ((rc == 0)); then
     python3 - "$response" <<'PY'
 import json
 import sys
@@ -839,10 +851,10 @@ PY
 # JSON export consistency, and SQLite integrity.
 verify_archive() {
   local latest="$1"
-  local hash 
-  local test_dir 
-  local payload 
-  local table_count 
+  local hash
+  local test_dir
+  local payload
+  local table_count
   local hash_basename
 
   [[ -f "$latest" ]] || {
@@ -883,7 +895,7 @@ verify_archive() {
 
   case "$members" in
     $'manifest.json
-x-ui.db'|$'3xui_export.json
+x-ui.db' | $'3xui_export.json
 manifest.json
 x-ui.db')
       ;;
@@ -952,39 +964,39 @@ PY
 
   table_count="$(sqlite3 "$test_dir/x-ui.db" \
     "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%';")" || {
-      rm -rf -- "$test_dir"
-      return 1
-    }
+    rm -rf -- "$test_dir"
+    return 1
+  }
 
   rm -rf -- "$test_dir"
   log INFO "archive_verification_ok; archive=$(basename -- "$latest"); application_tables=$table_count"
   return 0
 }
 
- weekly_test() {
+weekly_test() {
   local oldest
- 
-   # Run only on Mondays; ISO weekday: Monday = 1.
-   [[ "$(date -u +%u)" == "1" ]] || return 0
- 
+
+  # Run only on Mondays; ISO weekday: Monday = 1.
+  [[ "$(date -u +%u)" == "1" ]] || return 0
+
   if ! oldest="$(oldest_archive)"; then
     log ERROR "weekly restore test: unable to locate the oldest archive"
-     return 1
-   fi
- 
+    return 1
+  fi
+
   if [[ -z "$oldest" ]]; then
-     log WARN "weekly restore test skipped: no archive found"
-     return 0
-   fi
- 
+    log WARN "weekly restore test skipped: no archive found"
+    return 0
+  fi
+
   if ! verify_archive "$oldest"; then
     log ERROR "weekly restore test failed: $(basename -- "$oldest")"
-     return 1
-   fi
- 
+    return 1
+  fi
+
   log INFO "weekly_restore_test_ok; archive=$(basename -- "$oldest") (oldest retained copy)"
-   return 0
- }
+  return 0
+}
 
 rotate() {
   local max size old old_size side_size
@@ -998,23 +1010,23 @@ rotate() {
   }
 
   if [[ -n "$archive_list" ]]; then
-    mapfile -t age_candidates <<< "$archive_list"
+    mapfile -t age_candidates <<<"$archive_list"
   fi
 
   local total_count=${#age_candidates[@]}
-  local deletable=$(( total_count - KEEP_MIN_ARCHIVES ))
-  if (( deletable > 0 )); then
+  local deletable=$((total_count - KEEP_MIN_ARCHIVES))
+  if ((deletable > 0)); then
     local age_idx candidate mtime now age_seconds
     now="$(date +%s)"
 
-    for (( age_idx=0; age_idx<deletable; age_idx++ )); do
+    for ((age_idx = 0; age_idx < deletable; age_idx++)); do
       candidate="${age_candidates[$age_idx]}"
       [[ -f "$candidate" ]] || continue
       mtime="$(stat -c %Y -- "$candidate")" || return 1
-      age_seconds=$(( now - mtime ))
+      age_seconds=$((now - mtime))
 
-      if (( age_seconds > MAX_AGE_DAYS * 86400 )); then
-        if (( DRY_RUN || NO_PRUNE )); then
+      if ((age_seconds > MAX_AGE_DAYS * 86400)); then
+        if ((DRY_RUN || NO_PRUNE)); then
           log INFO "[$([ "$DRY_RUN" -eq 1 ] && echo dry-run || echo no-prune)] skip age delete: $(basename -- "$candidate")"
         else
           rm -f -- "$candidate" "${candidate}.sha256"
@@ -1024,9 +1036,12 @@ rotate() {
     done
   fi
 
-  max=$(( MAX_SIZE_GB * 1024 * 1024 * 1024 ))
+  max=$((MAX_SIZE_GB * 1024 * 1024 * 1024))
   size="$(archive_set_size_bytes)"
-  [[ "$size" =~ ^[0-9]+$ ]] || { log ERROR "Unable to compute archive set size"; return 1; }
+  [[ "$size" =~ ^[0-9]+$ ]] || {
+    log ERROR "Unable to compute archive set size"
+    return 1
+  }
 
   archive_list="$(oldest_archives_sorted)" || {
     log ERROR "Unable to enumerate archives in $BACKUP_DIR"
@@ -1034,13 +1049,13 @@ rotate() {
   }
 
   if [[ -n "$archive_list" ]]; then
-    mapfile -t archives <<< "$archive_list"
+    mapfile -t archives <<<"$archive_list"
   fi
 
   local total_archives=${#archives[@]}
   for old in "${archives[@]}"; do
-    (( size <= max )) && break
-    (( total_archives <= KEEP_MIN_ARCHIVES )) && break
+    ((size <= max)) && break
+    ((total_archives <= KEEP_MIN_ARCHIVES)) && break
 
     [[ -f "$old" ]] || continue
     old_size="$(stat -c %s -- "$old")" || return 1
@@ -1049,30 +1064,30 @@ rotate() {
       side_size="$(stat -c %s -- "${old}.sha256")" || return 1
     fi
 
-    if (( DRY_RUN || NO_PRUNE )); then
-      log INFO "[$([ "$DRY_RUN" -eq 1 ] && echo dry-run || echo no-prune)] skip size delete: $(basename -- "$old"); bytes=$(( old_size + side_size ))"
+    if ((DRY_RUN || NO_PRUNE)); then
+      log INFO "[$([ "$DRY_RUN" -eq 1 ] && echo dry-run || echo no-prune)] skip size delete: $(basename -- "$old"); bytes=$((old_size + side_size))"
     else
       rm -f -- "$old" "${old}.sha256"
-      log WARN "Rotated by size: $(basename -- "$old"); bytes=$(( old_size + side_size ))"
+      log WARN "Rotated by size: $(basename -- "$old"); bytes=$((old_size + side_size))"
     fi
 
-    if (( ! NO_PRUNE || DRY_RUN )); then
-      size=$(( size - old_size - side_size ))
-      (( total_archives-- ))
+    if ((! NO_PRUNE || DRY_RUN)); then
+      size=$((size - old_size - side_size))
+      ((total_archives--))
     fi
   done
 
-  if (( DRY_RUN )); then
+  if ((DRY_RUN)); then
     log INFO "[dry-run] Predicted archive-set size after rotation: ${size} bytes"
-  elif (( NO_PRUNE )); then
-    if (( size > max )); then
+  elif ((NO_PRUNE)); then
+    if ((size > max)); then
       log WARN "no-prune: archive set (${size} bytes) exceeds MAX_SIZE_GB (${MAX_SIZE_GB}GB); pruning skipped by flag"
       send_tg text "3x-ui backup: WARNING
 Host: $HOST_LABEL
 Archive set size (${size} bytes) exceeds ${MAX_SIZE_GB}GB, but --no-prune is active.
 No deletion performed. Manual review recommended." || true
     fi
-  elif (( size > max && total_archives <= KEEP_MIN_ARCHIVES )); then
+  elif ((size > max && total_archives <= KEEP_MIN_ARCHIVES)); then
     log WARN "Size limit exceeded, but KEEP_MIN_ARCHIVES reached. Halting deletion."
     send_tg text "3x-ui backup: WARNING
 Host: $HOST_LABEL
@@ -1116,7 +1131,7 @@ deliver_offsite() {
   rc=$?
   set -e
 
-  if (( rc == 0 )) && grep -qx "OK ${name} ${hash} ${size}" "$output"; then
+  if ((rc == 0)) && grep -qx "OK ${name} ${hash} ${size}" "$output"; then
     log INFO "offsite_delivery_ok; archive=$name; bytes=$size; sha256=$hash"
     rm -f -- "$output"
     return 0
@@ -1132,7 +1147,10 @@ deliver_offsite() {
 # ==============================================================================
 
 main() {
-  [[ $EUID -eq 0 ]] || { echo "Must run as root" >&2; exit 1; }
+  [[ $EUID -eq 0 ]] || {
+    echo "Must run as root" >&2
+    exit 1
+  }
   prepare_log_file
   require_cmd "${REQUIRED_COMMANDS[@]}"
 
@@ -1143,7 +1161,10 @@ main() {
 
   install -d -m 0700 -o root -g root "$LOCK_DIR"
   exec 9>"$LOCK_FILE"
-  flock -n 9 || { log INFO 'Already running'; exit 0; }
+  flock -n 9 || {
+    log INFO 'Already running'
+    exit 0
+  }
 
   prepare_backup_tree
   check_disk_space "$WORK_BASE" "$(required_work_mb)"
@@ -1154,7 +1175,7 @@ main() {
   make_run_id
   validate
 
-  if (( DRY_RUN )); then
+  if ((DRY_RUN)); then
     log INFO "[dry-run] validation ok; no backup, upload, pruning, or stale-artifact cleanup will be performed"
     rotate || {
       log ERROR "[dry-run] rotation simulation failed"
@@ -1253,7 +1274,6 @@ See /var/log/xui-backup.log for diagnostic." || true
 
   weekly_test || log WARN "weekly restore test failed; local archive kept"
 
-
   log INFO "Local backup completed; archive=$(basename "$final"); sha256=$hash"
 
   if [[ "$SEND_TELEGRAM" == 1 ]]; then
@@ -1281,11 +1301,27 @@ EOF
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --no-prune) NO_PRUNE=1; shift ;;
-      --dry-run)  DRY_RUN=1; shift ;;
-      -v|--verbose) VERBOSE=1; shift ;;
-      -h|--help) usage; exit 0 ;;
-      *) echo "Error: Unknown argument '$1'" >&2; usage >&2; exit 1 ;;
+      --no-prune)
+        NO_PRUNE=1
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      -v | --verbose)
+        VERBOSE=1
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "Error: Unknown argument '$1'" >&2
+        usage >&2
+        exit 1
+        ;;
     esac
   done
 }

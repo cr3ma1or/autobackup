@@ -58,7 +58,7 @@ log() {
   printf '%s [INFO] retention-v%s: %s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$SCRIPT_VERSION" \
-    "$1" >> "$LOG_FILE"
+    "$1" >>"$LOG_FILE"
 }
 
 cleanup() {
@@ -92,7 +92,7 @@ on_terminate() {
 
 fail() {
   if [[ -w "$LOG_FILE" ]]; then
-    printf '%s [ERROR] retention-v%s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SCRIPT_VERSION" "$1" >> "$LOG_FILE" 2>/dev/null || true
+    printf '%s [ERROR] retention-v%s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SCRIPT_VERSION" "$1" >>"$LOG_FILE" 2>/dev/null || true
   fi
   printf '%s [ERROR] retention-v%s: %s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -107,10 +107,10 @@ trap on_interrupt INT
 trap on_terminate TERM
 
 main() {
-  (( $# == 0 )) || fail 'cli_arguments_not_supported'
-# ------------------------------------------------------------------------------
-# Pre-flight Checks
-# ------------------------------------------------------------------------------
+  (($# == 0)) || fail 'cli_arguments_not_supported'
+  # ------------------------------------------------------------------------------
+  # Pre-flight Checks
+  # ------------------------------------------------------------------------------
   [[ $EUID -ne 0 ]] || fail 'must_not_run_as_root'
   [[ -d "$INCOMING_DIR" && -r "$INCOMING_DIR" && -w "$INCOMING_DIR" && -x "$INCOMING_DIR" ]] || fail 'incoming_directory_missing_or_no_access'
   [[ -d "$INVALID_DIR" && -r "$INVALID_DIR" && -w "$INVALID_DIR" && -x "$INVALID_DIR" ]] || fail 'invalid_directory_missing_or_no_access'
@@ -125,16 +125,16 @@ main() {
     fail "store_lock_timeout lock_file=$LOCK_FILE wait_seconds=$LOCK_WAIT_SECONDS"
   fi
 
-# ------------------------------------------------------------------------------
-# Stage 1: Sanitization & Rotation (Two-Pass Policy)
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
+  # Stage 1: Sanitization & Rotation (Two-Pass Policy)
+  # ------------------------------------------------------------------------------
 
-# Pass 1: Quarantine malformed or unverified archives across the entire incoming store
+  # Pass 1: Quarantine malformed or unverified archives across the entire incoming store
   local -a all_archives=()
   local archive base sidecar stamp
   mapfile -d '' -t all_archives < <(
-    find "$INCOMING_DIR" -maxdepth 1 -type f -name 'xui-backup-*.tar.gz.gpg' -print0 \
-    | sort -z
+    find "$INCOMING_DIR" -maxdepth 1 -type f -name 'xui-backup-*.tar.gz.gpg' -print0 |
+      sort -z
   )
 
   for archive in "${all_archives[@]}"; do
@@ -160,18 +160,18 @@ main() {
     fi
   done
 
-# Pass 2: Rotate verified archives exceeding the minimum guaranteed retention count
+  # Pass 2: Rotate verified archives exceeding the minimum guaranteed retention count
   local -a valid_archives=()
   local -i valid_count deletable
   mapfile -d '' -t valid_archives < <(
-    find "$INCOMING_DIR" -maxdepth 1 -type f -name 'xui-backup-*.tar.gz.gpg' -print0 \
-    | sort -z
+    find "$INCOMING_DIR" -maxdepth 1 -type f -name 'xui-backup-*.tar.gz.gpg' -print0 |
+      sort -z
   )
 
   valid_count="${#valid_archives[@]}"
-  deletable=$(( valid_count - KEEP_MIN_ARCHIVES ))
+  deletable=$((valid_count - KEEP_MIN_ARCHIVES))
 
-  if (( deletable > 0 )); then
+  if ((deletable > 0)); then
     for archive in "${valid_archives[@]:0:deletable}"; do
       [[ -f "$archive" ]] || continue
       base="${archive##*/}"
@@ -190,9 +190,9 @@ main() {
     log "no_valid_archive_deletion count=$valid_count minimum=$KEEP_MIN_ARCHIVES"
   fi
 
-# ------------------------------------------------------------------------------
-# Stage 2: Quarantine Purge
-# ------------------------------------------------------------------------------
+  # ------------------------------------------------------------------------------
+  # Stage 2: Quarantine Purge
+  # ------------------------------------------------------------------------------
   local item
   while IFS= read -r -d '' item; do
     rm -f -- "$item"
