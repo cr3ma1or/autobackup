@@ -59,6 +59,11 @@ readonly READ_TIMEOUT_SECONDS=300
 readonly DRAIN_TIMEOUT_SECONDS=3
 readonly DRAIN_MAX_BYTES=16777216   # 16 MiB — with margin to cover TCP/SSH channel buffers
 readonly LOG_FILE_WARN_BYTES=$((100 * 1024 * 1024)) # 100 MiB
+readonly -a REQUIRED_COMMANDS=(
+  awk chmod cmp cut date df find flock head id
+  mktemp mv rm sha256sum sort stat timeout wc
+)
+
 
 # ------------------------------------------------------------------------------
 # 2. Helper Functions & Error Handling
