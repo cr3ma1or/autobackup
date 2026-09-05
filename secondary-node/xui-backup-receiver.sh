@@ -132,11 +132,13 @@ prune_quarantine() {
   local remove_count
   local -a old_invalid=()
 
-  if ! manifest="$(mktemp "${BASE_DIR}/.prune_manifest.XXXXXX")"; then
+  # Создаём временный манифест внутри INVALID_DIR, где права гарантированно есть:
+  if ! manifest="$(mktemp "${INVALID_DIR}/.prune_manifest.XXXXXX")"; then
     fail "QUARANTINE_FAILED" "reason=manifest_creation_failed"
   fi
 
-  if ! find "$INVALID_DIR" -maxdepth 1 -type f -printf '%T@\t%p\0' |
+  # pipefail честно перехватывает сбой любой команды в пайплайне:
+  if ! find "$INVALID_DIR" -maxdepth 1 -type f ! -name '.*' -printf '%T@\t%p\0' |
       sort -z -n |
       cut -z -f2- > "$manifest"; then
     rm -f -- "$manifest" || true
@@ -159,7 +161,7 @@ prune_quarantine() {
   remove_count=$((count - MAX_QUARANTINE_FILES))
   for f in "${old_invalid[@]:0:remove_count}"; do
     rm -f -- "$f" ||
-    fail "QUARANTINE_PRUNE_FAILED" "file=$f"
+      fail "QUARANTINE_PRUNE_FAILED" "file=$f"
   done
 }
 
@@ -332,7 +334,7 @@ main() {
     fail "DISK_SPACE_INVALID" "avail_kb=$avail_kb"
   fi
 
-  needed_kb=$(((declared_size + 1023) / 1024 + SAFETY_BUFFER_KB))
+  needed_kb=$(((declared_size + 1023) / 1024 + MIN_FREE_KB + SAFETY_BUFFER_KB))
 
   # ----------------------------------------------------------------------------
   # Pre-flight Capacity Verification (теперь реально работает: avail_kb/needed_kb
@@ -342,7 +344,12 @@ main() {
     fail "STORAGE_EXHAUSTED" "available_kb=$avail_kb needed_kb=$needed_kb"
   fi
 
-  if ! exec 9>"$LOCK_FILE"; then
+  if [[ -L "$LOCK_FILE" ]]; then
+    fail "LOCK_FILE_INVALID" "reason=symlink_not_permitted lock_file=$LOCK_FILE"
+  fi
+
+  # Режим append (>>) исключает сброс содержимого и метаданных активного lock-файла
+  if ! exec 9>>"$LOCK_FILE"; then
     fail "RECEIVER_LOCK_OPEN_FAILED" "lock_file=$LOCK_FILE"
   fi
 
@@ -531,12 +538,12 @@ if ! chmod 0600 "$part" "$part_hash"; then
   fail "ARCHIVE_PERMISSION_SET_FAILED" "archive=$name"
 fi
 
- if ! mv -f -- "$part_hash" "$hash_file"; then
-   fail "PUBLISH_FAILED" "artifact=sidecar archive=$name"
- fi
-
  if ! mv -f -- "$part" "$final"; then
    fail "PUBLISH_FAILED" "artifact=archive archive=$name"
+ fi
+
+ if ! mv -f -- "$part_hash" "$hash_file"; then
+   fail "PUBLISH_FAILED" "artifact=sidecar archive=$name"
  fi
 
 trap - EXIT
