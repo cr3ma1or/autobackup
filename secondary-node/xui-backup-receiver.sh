@@ -7,7 +7,7 @@
 ### Dependencies:   bash (>= 4.4),
 ###                 coreutils (chmod, cut, date, df, head, id, mktemp, mv, rm,
 ###                 sha256sum, sort, stat, timeout, wc),
-###                 gawk/mawk (awk), diffutils (cmp),
+###                 awk implementation (gawk or mawk), diffutils (cmp),
 ###                 findutils (find), util-linux (flock)
 ### Requirements:   Must run under dedicated unprivileged user (xbackup, EUID != 0).
 ###                 Executed strictly via authorized_keys command="..." restriction.
@@ -17,7 +17,7 @@
 ###                 - STDIN: raw encrypted archive stream
 ### Outputs:        - STDOUT: "OK <name> <sha256> <size>" on success, "ERROR <CODE>" on failure
 ###                 - Appends structured audit logs to $LOG_FILE
-###                 - Standard error on runtime rejection
+###                 - STDERR: bootstrap errors and fallback diagnostics if audit-log writing fails
 ### Infrastructure Paths:
 ###   - Incoming store:   /opt/xui-backups/incoming       (0700 xbackup:xbackup)
 ###   - Quarantine store: /opt/xui-backups/invalid        (0700 xbackup:xbackup)
@@ -26,6 +26,7 @@
 ### Exit Codes:
 ###   0   - Success (delivery verified or idempotent delivery acknowledged)
 ###   1   - Validation error, protocol failure, capacity exhaustion, or lock busy
+###   129 - Interrupted by SIGHUP
 ###   130 - Interrupted by SIGINT
 ###   143 - Terminated by SIGTERM
 ### ==============================================================================
@@ -63,7 +64,6 @@ readonly -a REQUIRED_COMMANDS=(
   awk chmod cmp cut date df find flock head id
   mktemp mv rm sha256sum sort stat timeout wc
 )
-
 
 # ------------------------------------------------------------------------------
 # 2. Helper Functions & Error Handling
@@ -286,8 +286,12 @@ on_terminate() {
   local signal_name="${1:-TERM}"
   trap - INT TERM ERR HUP
   log WARN "interrupted reason=sig${signal_name,,}_received archive=${name:-unknown}" 2>/dev/null || true
-  exit 143
-}
+  case "$signal_name" in
+    HUP)  exit 129 ;;
+    TERM) exit 143 ;;
+    *)    exit 1 ;;
+  esac
+ }
 
 # ------------------------------------------------------------------------------
 # Main Entry Point
@@ -364,7 +368,9 @@ main() {
     fail "INVALID_SIZE" "archive=$name declared_size=$declared_size max_bytes=$MAX_BYTES"
   fi
 
-  # Pre-check: declared payload plus 500 MiB safety buffer plus 500 MiB disk free space.
+  # Require enough space for the declared payload while preserving at least
+  # MIN_FREE_KB (500 MiB) after completion, plus SAFETY_BUFFER_KB (100 MiB)
+  # for filesystem metadata and concurrent local activity.
   if ! storage_metrics="$(get_storage_metrics)"; then
     fail "DISK_SPACE_UNAVAILABLE" "base_dir=$BASE_DIR"
   fi
