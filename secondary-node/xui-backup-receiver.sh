@@ -56,6 +56,8 @@ readonly MIN_FREE_KB=512000            # 500 MiB floor
 readonly SAFETY_BUFFER_KB=102400       # 100 MiB per-upload buffer
 readonly MAX_UPLOADS_PER_24H=24
 readonly READ_TIMEOUT_SECONDS=300
+readonly DRAIN_TIMEOUT_SECONDS=3
+readonly DRAIN_MAX_BYTES=16777216   # 16 MiB — with margin to cover TCP/SSH channel buffers
 readonly LOG_FILE_WARN_BYTES=$((100 * 1024 * 1024)) # 100 MiB
 
 # ------------------------------------------------------------------------------
@@ -98,8 +100,8 @@ log() {
     return 0
   fi
 
-  printf -v timestamp '%(%Y-%m-%d %H:%M:%S)T' -1 2>/dev/null ||
-  timestamp="1970-01-01 00:00:00"
+  TZ=UTC printf -v timestamp '%(%Y-%m-%dT%H:%M:%SZ)T' -1 2>/dev/null ||
+  timestamp="1970-01-01T00:00:00Z"
 
   line="$(printf '%s [%s] [%s v%s pid=%s] %s' \
   "$timestamp" "$level" "$SCRIPT_NAME" "$SCRIPT_VERSION" "$$" "$message")"
@@ -120,8 +122,12 @@ fail() {
 
   log ERROR "code=$code $message" || true
 
-  # Даём клиенту выгрузить остаток буфера сокета, предотвращая преждевременный SIGPIPE
-  timeout 0.5 cat > /dev/null 2>&1 || true
+  # Best-effort drain of whatever the client already managed to push into the
+  # channel buffers at the moment of failure (usually a few MiB, bounded by the
+  # SSH/TCP window), with a dual cap on both time and volume -- does not
+  # guarantee a full drain on early failure before payload transfer begins,
+  # but covers the typical case.
+  timeout "${DRAIN_TIMEOUT_SECONDS}" head -c "${DRAIN_MAX_BYTES}" > /dev/null 2>&1 || true
 
   printf 'ERROR %s\n' "$code"
   exit 1
@@ -135,12 +141,12 @@ prune_quarantine() {
   local remove_count
   local -a old_invalid=()
 
-  # Создаём временный манифест внутри INVALID_DIR, где права гарантированно есть:
+  # Create a temporary manifest inside INVALID_DIR, where permissions are guaranteed:
   if ! manifest="$(mktemp "${INVALID_DIR}/.prune_manifest.XXXXXX")"; then
     fail "QUARANTINE_FAILED" "reason=manifest_creation_failed"
   fi
 
-  # Исключаем только сам служебный манифест ротации:
+  # Exclude only the rotation's own service manifest:
   if ! find "$INVALID_DIR" -maxdepth 1 -type f ! -name '.prune_manifest.*' -printf '%T@\t%p\0' |
       sort -z -n |
       cut -z -f2- > "$manifest"; then
@@ -195,8 +201,9 @@ get_storage_metrics() {
     return 1
   fi
 
-  # Склеиваем перенесённые строки (длинное имя ФС), затем берём последнюю
-  # строку вывода -- это гарантированно строка данных, а не заголовок.
+  # Join wrapped lines (long filesystem name), then take the last
+  # line of output -- this is guaranteed to be a data row, not the header.
+
   awk '
     NR > 1 { buf = (buf ? buf " " $0) : $0 }
     END {
@@ -370,7 +377,7 @@ main() {
     fail "INVALID_SIZE" "archive=$name declared_size=$declared_size max_bytes=$MAX_BYTES"
   fi
 
-  # Pre-check: declared payload plus 100 MiB safety buffer.
+  # Pre-check: declared payload plus 500 MiB safety buffer plus 500 MiB disk free space.
   if ! storage_metrics="$(get_storage_metrics)"; then
     fail "DISK_SPACE_UNAVAILABLE" "base_dir=$BASE_DIR"
   fi
@@ -386,8 +393,8 @@ main() {
   needed_kb=$(((declared_size + 1023) / 1024 + MIN_FREE_KB + SAFETY_BUFFER_KB))
 
   # ----------------------------------------------------------------------------
-  # Pre-flight Capacity Verification (теперь реально работает: avail_kb/needed_kb
-  # заполнены выше, в том же скоупе, без повторного local)
+  # Pre-flight Capacity Verification (now actually works: avail_kb/needed_kb
+  # are populated above, in the same scope, without re-declaring local)
   # ----------------------------------------------------------------------------
   if (( avail_kb < needed_kb )); then
     fail "STORAGE_EXHAUSTED" "available_kb=$avail_kb needed_kb=$needed_kb"
@@ -397,7 +404,7 @@ main() {
     fail "LOCK_FILE_INVALID" "reason=symlink_not_permitted lock_file=$LOCK_FILE"
   fi
 
-  # Режим append (>>) исключает сброс содержимого и метаданных активного lock-файла
+  # Append mode (>>) avoids truncating the content and metadata of an active lock file
   if ! exec 9>>"$LOCK_FILE"; then
     fail "RECEIVER_LOCK_OPEN_FAILED" "lock_file=$LOCK_FILE"
   fi
@@ -406,7 +413,7 @@ main() {
     fail "RECEIVER_BUSY" "lock_file=$LOCK_FILE"
   fi
 
-  final="${INCOMING_DIR}/${name}"   # name теперь реально заполнено
+  final="${INCOMING_DIR}/${name}"
   hash_file="${final}.sha256"
 
 # ----------------------------------------------------------------------------
@@ -505,8 +512,8 @@ part_hash="${part}.sha256"
 # ------------------------------------------------------------------------------
 # 7. Stream Ingestion & Verification
 # ------------------------------------------------------------------------------
-# Read payload from STDIN (с таймаутом на случай зависшего клиента,
-# который держит flock и слот rate-limit неопределённо долго)
+# Read payload from STDIN (with a timeout in case of a hung client
+# holding the flock and rate-limit slot indefinitely)
 if ! timeout "${READ_TIMEOUT_SECONDS}" head -c "$declared_size" > "$part"; then
   quarantine_part 'partial'
   fail "READ_FAILED" "archive=$name reason=timeout_or_short_read"
