@@ -66,29 +66,11 @@ readonly LOG_FILE_WARN_BYTES=$((100 * 1024 * 1024)) # 100 MiB
 require_commands() {
   local command_name
 
-for command_name in \
-  awk \
-  chmod \
-  cmp \
-  cut \
-  date \
-  df \
-  find \
-  flock \
-  head \
-  id \
-  mktemp \
-  mv \
-  rm \
-  sha256sum \
-  sort \
-  stat \
-  timeout \
-  wc; do
+  for command_name in "${REQUIRED_COMMANDS[@]}"; do
     command -v "$command_name" >/dev/null 2>&1 ||
       fail "MISSING_DEPENDENCY" "command=$command_name"
   done
-}
+ }
 
 log() {
   local level="$1"
