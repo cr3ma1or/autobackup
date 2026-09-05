@@ -4,7 +4,10 @@
 ### Description:    SSH forced-command receiver for automated, verified backup delivery.
 ###                 Ingests payload stream over STDIN, validates SHA-256 integrity,
 ###                 and atomically publishes archive and sidecar files.
-### Dependencies:   bash (>= 4.4), coreutils (cut, date, df, head, sha256sum, sort, stat),
+### Dependencies:   bash (>= 4.4),
+###                 coreutils (chmod, cut, date, df, head, id, mktemp, mv, rm,
+###                 sha256sum, sort, stat, timeout, wc),
+###                 gawk/mawk (awk), diffutils (cmp),
 ###                 findutils (find), util-linux (flock)
 ### Requirements:   Must run under dedicated unprivileged user (xbackup, EUID != 0).
 ###                 Executed strictly via authorized_keys command="..." restriction.
@@ -302,7 +305,7 @@ main() {
   # 4. Command Parsing & Pre-flight Validation
   # ----------------------------------------------------------------------------
   original="${SSH_ORIGINAL_COMMAND:-}"
-  command_regex='^receive[[:space:]]+(xui-backup-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.tar\.gz\.gpg)[[:space:]]+([a-f0-9]{64})[[:space:]]+([1-9][0-9]*)$'
+  command_regex='^receive[[:space:]]+(xui-backup-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\.tar\.gz\.gpg)[[:space:]]+([a-f0-9]{64})[[:space:]]+([1-9][0-9]{0,12})$'
 
   if [[ "$original" =~ $command_regex ]]; then
     name="${BASH_REMATCH[1]}"
